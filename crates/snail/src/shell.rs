@@ -8,7 +8,7 @@ use std::sync::Arc;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
-use snail_ui::empty::{EmptyState, IconHint};
+use snail_ui::empty::EmptyState;
 use snail_ui::selection::Selection;
 use snail_ui::text::TextRole;
 
@@ -25,7 +25,12 @@ struct Reading {
     subject: String,
     from: String,
     meta: String,
-    body: String,
+    body: BodyKind,
+}
+
+enum BodyKind {
+    Plain(String),
+    Html(crate::html_view::HtmlView),
 }
 
 pub struct Shell {
@@ -61,12 +66,12 @@ impl Shell {
             selection: Selection::new(),
             reading: None,
         };
-        shell.reload();
+        shell.reload(window);
         shell
     }
 
     /// Read mailboxes and the selected mailbox's page. Local and fast; E5.12 moves it off-thread.
-    fn reload(&mut self) {
+    fn reload(&mut self, window: &mut Window) {
         self.mailboxes = self.mail.mailboxes();
         if self.selected_mailbox >= self.mailboxes.len() {
             self.selected_mailbox = 0;
@@ -90,26 +95,34 @@ impl Shell {
                 self.selection.select_in(&ids, *first);
             }
         }
-        self.load_reading();
+        self.load_reading(window);
     }
 
-    fn select_mailbox(&mut self, index: usize) {
+    fn select_mailbox(&mut self, index: usize, window: &mut Window) {
         self.selected_mailbox = index;
         self.selection = Selection::new();
-        self.reload();
+        self.reload(window);
     }
 
-    fn load_reading(&mut self) {
-        self.reading = self.selection.cursor().and_then(|id| self.read_message(id));
+    fn load_reading(&mut self, window: &mut Window) {
+        self.reading = self.selection.cursor().and_then(|id| self.read_message(id, window));
     }
 
-    fn read_message(&self, id: i64) -> Option<Reading> {
+    fn read_message(&self, id: i64, window: &mut Window) -> Option<Reading> {
         let row = self.mail.message(id)?;
         let parsed = self.mail.parsed(id)?;
-        let body = parsed
-            .plain
-            .filter(|text| !text.trim().is_empty())
-            .unwrap_or_else(|| "(This message has no readable text part.)".to_string());
+        let body = match parsed.body {
+            snail_core::mime::Body::Html(html) => {
+                // 640px is roughly the reading pane's content width at the default window size.
+                BodyKind::Html(crate::html_view::layout_html(&html, 640.0, window))
+            }
+            _ => BodyKind::Plain(
+                parsed
+                    .plain
+                    .filter(|text| !text.trim().is_empty())
+                    .unwrap_or_else(|| "(This message has no readable text part.)".to_string()),
+            ),
+        };
         Some(Reading {
             subject: row.subject.unwrap_or_else(|| "(no subject)".into()),
             from: row
@@ -257,8 +270,8 @@ impl Shell {
             .when(selected, |this| this.bg(style::color(palette.colors.accent_tint_deep)))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _event, _window, cx| {
-                    this.select_mailbox(index);
+                cx.listener(move |this, _event, window, cx| {
+                    this.select_mailbox(index, window);
                     cx.notify();
                 }),
             )
@@ -381,10 +394,10 @@ impl Shell {
             .border_color(style::color(palette.colors.border_hairline))
             .when(selected, |this| this.bg(style::color(palette.colors.accent_tint)))
             .when(!selected, |this| this.hover(|s| s.bg(rgba(0x00000008))))
-            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                 weak.update(cx, |this, cx| {
                     this.selection.select_in(&ids, id);
-                    this.load_reading();
+                    this.load_reading(window);
                     cx.notify();
                 })
                 .ok();
@@ -502,7 +515,12 @@ impl Shell {
                     .overflow_y_scroll()
                     .px_6()
                     .py_5()
-                    .child(style::text(reading.body.clone(), TextRole::BodySerif, cx)),
+                    .child(match &reading.body {
+                        BodyKind::Html(view) => crate::html_view::paint(view),
+                        BodyKind::Plain(text) => {
+                            style::text(text.clone(), TextRole::BodySerif, cx).into_any_element()
+                        }
+                    }),
             )
             .into_any_element()
     }
@@ -588,7 +606,7 @@ impl Render for Shell {
             .bg(style::color(palette.colors.canvas))
             .text_color(style::color(palette.colors.ink))
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 match event.keystroke.key.as_str() {
                     "f2" => this.overlay.toggle(),
                     "f3" => {
@@ -601,11 +619,11 @@ impl Render for Shell {
                     }
                     "up" => {
                         this.selection.move_by(-1, &ids);
-                        this.load_reading();
+                        this.load_reading(window);
                     }
                     "down" => {
                         this.selection.move_by(1, &ids);
-                        this.load_reading();
+                        this.load_reading(window);
                     }
                     _ => return,
                 }

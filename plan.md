@@ -913,6 +913,15 @@ background executor.*
 E0.3 spike's failure taxonomy. All of it lives in `snail-core` (parse/sanitize) and `snail-ui`
 (layout), so the whole thing is testable without GPUI.*
 
+*First cut done (2026-09-21): the reading pane renders HTML messages through the E0.3 pipeline —
+ammonia sanitize keeping the supported `style` subset → html5ever → the `snail-ui` DOM → block/inline
+layout with real GPUI text metrics → painted fragments. It is the E0.3 prototype promoted into
+`crates/snail/src/html_view.rs`; the E6 crate-boundary decision (where parse/sanitize lives, since
+`snail-core` and `snail-ui` may not depend on each other) is still open, which is why the parsing
+sits in the bin for now. Remaining: `<style>`/class resolution (6.3/6.4), `colspan`/nested tables
+(6.6), `cid:` images (6.8), quoted-text folding (6.9), selection (6.10), and the corpus snapshot
+test (6.14).*
+
 - [ ] 6.1 — MIME → displayable document: walk the part tree, pick the best alternative
       (`text/plain` vs `text/html` per the settings toggle), resolve `multipart/related` `cid:`
       references to cached attachment files, handle `format=flowed` for plain text, and decode
@@ -964,7 +973,7 @@ E0.3 spike's failure taxonomy. All of it lives in `snail-core` (parse/sanitize) 
       it to the system browser. The honest answer for the 2% of messages the subset can't do.
 - [ ] 6.13 — Fallback rendering: if layout fails or exceeds a node/time budget, fall back to
       `text/plain`, then to a flattened text extraction. **A message must always render something.**
-- [ ] 6.13b — Before building 6.5–6.7, spend a day on **gpui-kit's `TextView`**, which already
+- [x] 6.13b — Before building 6.5–6.7, spend a day on **gpui-kit's `TextView`**, which already
       renders Markdown *and* HTML natively (there is an `example-html` in its gallery). If its HTML
       support covers a useful fraction of the E0.3 corpus, it is either a shortcut to a working
       reading pane or, at minimum, the fallback renderer for 6.13. Nobody should write a layout

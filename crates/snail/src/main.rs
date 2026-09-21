@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 mod dev_overlay;
 mod frame_stats;
+mod html_view;
 mod icons;
 mod mail_model;
 mod rss;
