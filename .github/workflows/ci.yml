@@ -85,6 +85,10 @@ jobs:
         working-directory: spikes/e0.2
         run: cargo build
 
+      - name: Build E0.3 analyze (MIME + sanitize taxonomy)
+        working-directory: spikes/e0.3
+        run: cargo build --bin e0-3-analyze
+
       - name: Build E0.4 (auth spike)
         working-directory: spikes/e0.4
         run: cargo build

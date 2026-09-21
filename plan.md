@@ -924,6 +924,10 @@ E0.3 spike's failure taxonomy. All of it lives in `snail-core` (parse/sanitize) 
       support covers a useful fraction of the E0.3 corpus, it is either a shortcut to a working
       reading pane or, at minimum, the fallback renderer for 6.13. Nobody should write a layout
       engine without first checking what the component library already does.
+      **Confirmed present at 0.6.4 (E0.3, 2026-09-21):** `component::text::TextView::html(id,
+      text)` with `.selectable()`, `.scrollable()`, `.table_actions()`, `.on_link_click()`. The
+      E0.3 corpus renders table-heavy mail (23/24 use tables, up to 13 deep), so its table handling
+      is the thing to judge before committing to E6.5–E6.7.
 - [ ] 6.14 — Corpus test: render the full E0.3 corpus plus everything added since, snapshot the box
       trees, and fail CI on an unexplained diff. This is the regression net for the whole epic.
 

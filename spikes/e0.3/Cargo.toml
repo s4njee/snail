@@ -1,0 +1,35 @@
+# E0.3 spike: the HTML renderer's hardest real input (plan.md §3, E0.3).
+#
+# Its own workspace. The `analyze` binary is pure Rust (mail-parser + ammonia) and compiles fast;
+# the `gui` feature adds the gpui-kit `TextView::html` renderer, which is the E6.13b shortcut.
+[workspace]
+
+[package]
+name = "snail-e0-3"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+mail-parser = "0.11"
+ammonia = "4"
+gpui-kit = { version = "=0.6.4", default-features = true, optional = true }
+gpui-pre = { version = "=0.3.5", optional = true }
+gpui-pre-platform = "=0.3.5"
+env_logger = "0.11"
+log = "0.4"
+
+[features]
+gui = ["dep:gpui-kit", "dep:gpui-pre"]
+
+[[bin]]
+name = "e0-3-analyze"
+path = "src/bin/analyze.rs"
+
+[[bin]]
+name = "e0-3-render"
+path = "src/bin/render.rs"
+required-features = ["gui"]
+
+[profile.dev.package."*"]
+opt-level = 2

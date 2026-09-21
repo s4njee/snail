@@ -170,9 +170,43 @@ Findings, all captured fresh:
 
 ---
 
-## E0.3 — HTML renderer over the owner's 20 worst messages
+## E0.3 — HTML renderer over the owner's worst messages
 
-_pending — corpus is a hard input (see the E0 ask list)_
+**Corpus: 24 messages, 2.8 MB** (gitignored `spikes/corpus/`), dumped from Gmail `format=raw` by
+`spikes/e0.4 corpus`: newsletter / github / calendar-invite / quoted-chain / attachment / plain /
+receipt / notification.
+
+**Analyze (`cargo run --bin e0-3-analyze`) — the failure taxonomy:**
+
+| Measure | Result |
+|---|---|
+| HTML bodies | **24 / 24** (no plain-only message in this corpus) |
+| Contain `<table>` | **23 / 24** |
+| Nested ≥2 deep | **21 / 24** |
+| Nested ≥3 deep | **21 / 24**; deepest **13** |
+| Inline `cid:` images | 4 / 24 |
+| Use a deliberately-unsupported property (float/position/flex/grid/transform/@media) | **23 / 24** |
+| `format=flowed` plain text | 0 / 24 |
+| MIME parse | avg **0.33 ms**, max **1.71 ms** |
+| Sanitize (ammonia) | avg **1.06 ms**, max **3.64 ms** |
+
+**Read:** parse + sanitize together are ~1.4 ms average and never exceed 5.4 ms, so the CPU cost
+before layout is comfortably inside a frame. The hard part is exactly what the plan predicted:
+**tables, and nested tables** — E6.6 is the epic, not an edge case. The 4 `cid:` messages and the
+one newsletter with 274 remote URLs exercise E6.2/E6.8. `format=flowed` was *not* hit by this
+corpus (the `plain` query returned HTML-bodied mail); a synthetic fixture is needed for it.
+
+Worst offenders by unsupported constructs: `receipt-2` (43), `quoted-chain-2`/`receipt-1` (27,
+67 tables each at depth 9), the two calendar invites (15).
+
+**E6.13b — `TextView::html`:** gpui-kit 0.6.4 ships it (`component::text::TextView::html(id, text)`,
+`.selectable()`, `.scrollable()`, `.table_actions()`, `.on_link_click()`). `spikes/e0.3` renders the
+sanitized corpus through it (`cargo run --features gui --bin e0-3-render`). It builds and opens;
+**readability verdict pending the owner's eyeball pass** over the 24 documents.
+
+**Go/no-go:** not yet decided. Parse/sanitize pass; readability and the 16 ms screenful await the
+render pass. If `TextView::html` reads most of the corpus, E6 gets dramatically cheaper and it
+becomes E6.13's fallback renderer regardless.
 
 ---
 
