@@ -243,8 +243,17 @@ style subset + `resolve_style`) and `crates/snail-ui/src/layout.rs` (block stack
 wrapping with alignment, table columns with padding/borders) produce a flat display list from a
 `TextMeasure` trait. 9 unit tests run against a fake metrics impl, with no GPUI. The GPUI bin
 `e0-3-layout` parses MIME → sanitizes (keeping the supported `style` subset) → html5ever →
-`snail-ui` DOM → layout → fragments. This is the seed of E6.5/E6.6, not the finished renderer:
-`colspan`/nested tables, real font metrics and images are still approximate.
+`snail-ui` DOM → layout → fragments.
+
+A headless `--dump` mode (layout against fake metrics, no window) caught a real bug immediately:
+`thead`/`tbody`/`tfoot` were being classified as `Display::TableRow`, so `collect_rows` treated the
+section as a row, found no cells, and **silently dropped every table's content** (the USPS message
+laid out as 38 fragments / 70px with two visible words). With sections as pass-through, the same
+message is 506 fragments / 3022px with a 32px centred heading and 16–22px body — the value of
+splitting layout into a GPUI-free crate, demonstrated on day one.
+
+Still approximate: `colspan`/`rowspan`, deeply nested tables, real font metrics, and `<style>`/
+`class` resolution (E6.3) are not done.
 
 **Go/no-go:** not yet decided. Parse/sanitize pass comfortably. Readability does **not** pass with
 `TextView::html`, which makes E6.5–E6.7 necessary rather than optional — a scope confirmation, not a

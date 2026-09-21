@@ -17,7 +17,7 @@ use html5ever::tendril::TendrilSink;
 use mail_parser::MessageParser;
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 use snail_ui::html::{resolve_style, FontSpec, Node, Style};
-use snail_ui::layout::{self, Fragment};
+use snail_ui::layout::{self, Fragment, TextMeasure};
 
 fn main() {
     let _ = env_logger::try_init();
@@ -36,6 +36,31 @@ fn main() {
 
     let docs = load_docs(&dir, raw);
     println!("loaded {} documents from {}", docs.len(), dir.display());
+
+    if std::env::args().any(|arg| arg == "--dump") {
+        let mut measure = FakeMeasure;
+        for (name, html) in docs.iter().take(3) {
+            let sanitized = sanitize(html);
+            let dom = parse_to_dom(html);
+            let result = layout::layout(&dom, 820.0, &measure);
+            println!(
+                "{name}: raw_html={} sanitized={} top_nodes={} fragments={} height={:.0}",
+                html.len(),
+                sanitized.len(),
+                dom.len(),
+                result.fragments.len(),
+                result.height
+            );
+            let text: String = collect_text(&dom).chars().take(160).collect();
+            println!("    text: {text}");
+            print_tree(&dom, 0, &mut 200);
+            for (text, x, y, size) in result.words().take(12) {
+                println!("    ({x:7.1},{y:7.1}) {size:>4.0}px  {text}");
+            }
+        }
+        let _ = &mut measure;
+        return;
+    }
 
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
@@ -222,6 +247,51 @@ fn paint_fragment(fragment: &Fragment) -> AnyElement {
     }
 }
 
+fn print_tree(nodes: &[Node], depth: usize, budget: &mut usize) {
+    use snail_ui::html::Display;
+    for node in nodes {
+        if *budget == 0 || depth > 8 {
+            return;
+        }
+        *budget -= 1;
+        match node {
+            Node::Text(text) => {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    println!(
+                        "{}text {:?}",
+                        "  ".repeat(depth + 1),
+                        &trimmed[..trimmed.len().min(40)]
+                    );
+                }
+            }
+            Node::Element(element) => {
+                let kind = match element.style.display {
+                    Display::Block => "block",
+                    Display::Inline => "inline",
+                    Display::Table => "table",
+                    Display::TableRow => "row",
+                    Display::TableCell => "cell",
+                    Display::None => "none",
+                };
+                println!("{}{} [{kind}]", "  ".repeat(depth + 1), element.tag);
+                print_tree(&element.children, depth + 1, budget);
+            }
+        }
+    }
+}
+
+fn collect_text(nodes: &[Node]) -> String {
+    let mut out = String::new();
+    for node in nodes {
+        match node {
+            Node::Text(text) => out.push_str(text),
+            Node::Element(element) => out.push_str(&collect_text(&element.children)),
+        }
+    }
+    out
+}
+
 fn to_u32(color: [u8; 4]) -> u32 {
     (color[0] as u32) << 24 | (color[1] as u32) << 16 | (color[2] as u32) << 8 | color[3] as u32
 }
@@ -375,6 +445,16 @@ fn load_docs(dir: &PathBuf, raw: bool) -> Vec<(String, String)> {
 }
 
 // --- GPUI text metrics ----------------------------------------------------------------------
+
+/// Deterministic metrics for the headless `--dump`, so parsing and layout can be checked without a
+/// window.
+struct FakeMeasure;
+
+impl TextMeasure for FakeMeasure {
+    fn width(&self, text: &str, _font: &FontSpec) -> f32 {
+        text.chars().count() as f32 * 8.0
+    }
+}
 
 struct GpuiMeasure<'a> {
     text_system: &'a WindowTextSystem,

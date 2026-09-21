@@ -139,7 +139,9 @@ pub fn resolve_style(tag: &str, attrs: &HashMap<String, String>, parent: &Style)
             style.display = Display::Table;
             style.border = 1.0;
         }
-        "thead" | "tbody" | "tfoot" | "tr" => style.display = Display::TableRow,
+        // Sections are pass-through: only rows are rows (collect_rows recurses into sections).
+        "thead" | "tbody" | "tfoot" => {}
+        "tr" => style.display = Display::TableRow,
         "td" | "th" => {
             style.display = Display::TableCell;
             style.padding = 6.0;
