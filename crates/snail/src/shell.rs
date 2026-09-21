@@ -278,6 +278,8 @@ impl Shell {
     fn list(&self, palette: &snail_ui::theme::Theme, cx: &mut Context<Self>) -> AnyElement {
         let rows = self.rows.clone();
         let selection = self.selection.clone();
+        let row_ids = Arc::new(self.rows.iter().map(|row| row.id).collect::<Vec<i64>>());
+        let weak = cx.entity().downgrade();
         let count = self.rows.len();
         let title = self
             .mailboxes
@@ -329,7 +331,14 @@ impl Shell {
                             let palette = style::palette(cx);
                             range
                                 .map(|index| {
-                                    Self::row(palette, &rows[index], selection.is_selected(rows[index].id), cx)
+                                    Self::row(
+                                        palette,
+                                        &rows[index],
+                                        selection.is_selected(rows[index].id),
+                                        weak.clone(),
+                                        row_ids.clone(),
+                                        cx,
+                                    )
                                 })
                                 .collect::<Vec<_>>()
                         })
@@ -344,8 +353,11 @@ impl Shell {
         palette: &snail_ui::theme::Theme,
         row: &MessageRow,
         selected: bool,
+        weak: WeakEntity<Self>,
+        ids: Arc<Vec<i64>>,
         cx: &App,
     ) -> AnyElement {
+        let id = row.id;
         let sender = row
             .from_name
             .clone()
@@ -368,7 +380,15 @@ impl Shell {
             .border_b_1()
             .border_color(style::color(palette.colors.border_hairline))
             .when(selected, |this| this.bg(style::color(palette.colors.accent_tint)))
-            .when(!selected, |this| this.hover(|s| s.bg(rgba(0x00000008))));
+            .when(!selected, |this| this.hover(|s| s.bg(rgba(0x00000008))))
+            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                weak.update(cx, |this, cx| {
+                    this.selection.select_in(&ids, id);
+                    this.load_reading();
+                    cx.notify();
+                })
+                .ok();
+            });
         base.when(selected, |this| {
             this.child(
                 div()
