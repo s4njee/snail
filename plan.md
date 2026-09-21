@@ -880,6 +880,9 @@ E0.3 spike's failure taxonomy. All of it lives in `snail-core` (parse/sanitize) 
       (`text/plain` vs `text/html` per the settings toggle), resolve `multipart/related` `cid:`
       references to cached attachment files, handle `format=flowed` for plain text, and decode
       every charset the wild throws (not just UTF-8 — legacy `ISO-8859-*`, `Shift_JIS`, `GB2312`).
+      **Carry the E0.3 selector finding:** `body_html()` converts plain text and the
+      `html_body_count()`/`text_body_count()` lists are unreliable (mail-parser copies a lone part
+      across both), so select on `part.is_text_html()` / `is_text()`.
 - [ ] 6.2 — Sanitize with `ammonia` against an explicit allowlist. Strip `<script>`, `<iframe>`,
       `<object>`, `<form>`, every `on*` handler, and `javascript:`/`data:` URLs. **All remote URLs
       are rewritten to a blocked placeholder by default** — this is architecture, not a setting

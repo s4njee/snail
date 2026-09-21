@@ -172,37 +172,54 @@ Findings, all captured fresh:
 
 ## E0.3 — HTML renderer over the owner's worst messages
 
-**Corpus: 24 messages, 2.8 MB** (gitignored `spikes/corpus/`), dumped from Gmail `format=raw` by
-`spikes/e0.4 corpus`: newsletter / github / calendar-invite / quoted-chain / attachment / plain /
-receipt / notification.
+**Corpus: 24 real messages, 2.8 MB** (gitignored `spikes/corpus/`), dumped from Gmail
+`format=raw` by `spikes/e0.4 corpus`: newsletter / github / calendar-invite / quoted-chain /
+attachment / plain / receipt / notification. Plus **one committed synthetic fixture**
+(`spikes/e0.3/fixtures/format-flowed.eml`) because the `plain` query returned HTML-bodied mail and
+so `format=flowed` was never exercised by real mail.
 
 **Analyze (`cargo run --bin e0-3-analyze`) — the failure taxonomy:**
 
 | Measure | Result |
 |---|---|
-| HTML bodies | **24 / 24** (no plain-only message in this corpus) |
+| Real HTML bodies | **24 / 24** |
 | Contain `<table>` | **23 / 24** |
 | Nested ≥2 deep | **21 / 24** |
 | Nested ≥3 deep | **21 / 24**; deepest **13** |
 | Inline `cid:` images | 4 / 24 |
 | Use a deliberately-unsupported property (float/position/flex/grid/transform/@media) | **23 / 24** |
-| `format=flowed` plain text | 0 / 24 |
-| MIME parse | avg **0.33 ms**, max **1.71 ms** |
-| Sanitize (ammonia) | avg **1.06 ms**, max **3.64 ms** |
+| `format=flowed` plain text | 1 (the synthetic fixture) |
+| MIME parse | avg **0.41 ms**, max **2.10 ms** |
+| Sanitize (ammonia) | avg **1.32 ms**, max **3.69 ms** |
 
-**Read:** parse + sanitize together are ~1.4 ms average and never exceed 5.4 ms, so the CPU cost
+**Body-selection sharp edge found while adding the fixture (input for E6.1):**
+`Message::body_html(pos)` **converts** `text/plain` to HTML, and `html_body_count()`/`html_bodies()`
+are **not** a reliable "does this message have real HTML" signal — for an alternative (or a lone
+part) mail-parser **copies the part across both lists**. Selecting on the aggregate lists therefore
+misclassifies plain mail as HTML. The correct selector is the part's MIME type:
+`message.html_bodies().any(|part| part.is_text_html())`, then `text_bodies()` / `is_text()`.
+Recorded in the analyzer and worth carrying into E6.1.
+
+**Read:** parse + sanitize together are ~1.7 ms average and never exceed 5.8 ms, so the CPU cost
 before layout is comfortably inside a frame. The hard part is exactly what the plan predicted:
 **tables, and nested tables** — E6.6 is the epic, not an edge case. The 4 `cid:` messages and the
-one newsletter with 274 remote URLs exercise E6.2/E6.8. `format=flowed` was *not* hit by this
-corpus (the `plain` query returned HTML-bodied mail); a synthetic fixture is needed for it.
+one newsletter with 274 remote URLs exercise E6.2/E6.8.
 
 Worst offenders by unsupported constructs: `receipt-2` (43), `quoted-chain-2`/`receipt-1` (27,
 67 tables each at depth 9), the two calendar invites (15).
 
 **E6.13b — `TextView::html`:** gpui-kit 0.6.4 ships it (`component::text::TextView::html(id, text)`,
 `.selectable()`, `.scrollable()`, `.table_actions()`, `.on_link_click()`). `spikes/e0.3` renders the
-sanitized corpus through it (`cargo run --features gui --bin e0-3-render`). It builds and opens;
-**readability verdict pending the owner's eyeball pass** over the 24 documents.
+sanitized corpus through it (`cargo run --features gui --bin e0-3-render`). It builds, opens and
+renders; **readability verdict pending the owner's eyeball pass** over the 24 documents.
+
+**Finding while rendering:** `TextView::html` does **not** block remote content — it tried to fetch
+remote images itself (`Failed to load asset ... "http://pixel.watch/..."`, `No HttpClient
+available`) for the newsletters that carry tracking pixels and hosted images. Nothing was fetched
+(no HTTP client is installed), but this proves E6.2's rule is load-bearing: **remote URLs must be
+rewritten to a blocked placeholder before the HTML reaches any renderer**, including `TextView`.
+Relying on the renderer to be inert would leak opens (and here, it just errors). `cid:` images will
+likewise need resolving to cache files before render.
 
 **Go/no-go:** not yet decided. Parse/sanitize pass; readability and the 16 ms screenful await the
 render pass. If `TextView::html` reads most of the corpus, E6 gets dramatically cheaper and it

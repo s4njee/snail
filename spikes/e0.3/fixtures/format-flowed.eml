@@ -1,0 +1,23 @@
+From: Snail Fixtures <fixtures@snail.invalid>
+To: Owner <owner@snail.invalid>
+Subject: Re: quarterly notes (format=flowed fixture)
+Date: Mon, 21 Sep 2026 10:00:00 -0500
+Message-ID: <flowed-1@snail.invalid>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8; format=flowed
+Content-Transfer-Encoding: 7bit
+
+This first line ends with a space so it is a soft break,
+ and this continuation must join onto it without inserting a space.
+A line with no trailing space is a hard break; the next line starts fresh.
+
+> This quoted line ends with a space,
+> so it flows too.
+>
+> Space-stuffing means a body line that begins with a space or > is prefixed
+> with an extra space in transit; a correct decoder removes it.
+
+The signature separator below is a hard break and never flows:
+
+--
+Snail fixtures, generated for E0.3 because real mail did not supply a flowed body.

@@ -115,10 +115,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| dir.join("sanitized"));
     fs::create_dir_all(&out)?;
 
-    let mut files: Vec<PathBuf> = fs::read_dir(&dir)?
-        .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .filter(|path| path.extension().is_some_and(|ext| ext == "eml"))
-        .collect();
+    // Always fold in the committed synthetic fixtures, so `format=flowed` and the other cases real
+    // mail did not supply are covered reproducibly (they cannot live in the gitignored corpus).
+    let mut dirs = vec![dir.clone()];
+    let fixtures = PathBuf::from("fixtures");
+    if fixtures.is_dir() && fixtures != dir {
+        dirs.push(fixtures);
+    }
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    for source in &dirs {
+        if !source.is_dir() {
+            continue;
+        }
+        files.extend(
+            fs::read_dir(source)?
+                .filter_map(|entry| entry.ok().map(|e| e.path()))
+                .filter(|path| path.extension().is_some_and(|ext| ext == "eml")),
+        );
+    }
     files.sort();
 
     println!(
@@ -143,21 +158,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let parsed = MessageParser::default().parse(&bytes);
         let parse_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
 
+        // mail-parser's aggregate `html_body`/`text_body` lists are *not* a reliable "has real
+        // HTML" signal: for an alternative or a lone part it copies the part across both lists.
+        // Select on the part's actual MIME type instead (E6.1).
+        let has_real_html = parsed
+            .as_ref()
+            .is_some_and(|message| message.html_bodies().any(|part| part.is_text_html()));
+        let has_text = parsed
+            .as_ref()
+            .is_some_and(|message| message.text_bodies().any(|part| part.is_text()));
+
         let (kind, body): (&'static str, String) = match &parsed {
-            Some(message) => {
-                if let Some(html) = message.body_html(0) {
-                    ("html", html.to_string())
-                } else if let Some(text) = message.body_text(0) {
-                    ("text", text.to_string())
-                } else {
-                    ("none", String::new())
-                }
-            }
-            None => ("none", String::new()),
+            Some(message) if has_real_html => (
+                "html",
+                message.body_html(0).map(|c| c.into_owned()).unwrap_or_default(),
+            ),
+            Some(message) if has_text => (
+                "text",
+                message.body_text(0).map(|c| c.into_owned()).unwrap_or_default(),
+            ),
+            _ => ("none", String::new()),
         };
 
         let mut features = Features::scan(&body);
-        features.format_flowed = body.to_ascii_lowercase().contains("format=flowed");
+        // `format=flowed` is a Content-Type parameter in the message header, not something in the
+        // decoded body, so scan only the header block.
+        let raw = String::from_utf8_lossy(&bytes).to_ascii_lowercase();
+        let header_end = raw.find("\r\n\r\n").or_else(|| raw.find("\n\n")).unwrap_or(raw.len());
+        features.format_flowed = raw[..header_end].contains("format=flowed");
 
         let sanitize_start = Instant::now();
         let sanitized = if kind == "html" {
