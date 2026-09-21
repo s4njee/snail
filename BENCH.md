@@ -26,3 +26,14 @@ Command: `SNAIL_CONFIG_DIR=… SNAIL_CACHE_DIR=… snail --bench-store`
 mailboxes on the fixture. The sidebar reads the stored `mailbox.unread` counter instead; the
 `count(*)` path is kept as `recount_mailbox` for rebuilds and full resyncs. The list budget
 (`< 2 ms` draw p50) is a paint-time budget and lands in E5.12; these are query times.
+
+## E4 — real-mail backfill, 2026-09-21
+
+`snail --backfill-gmail --limit 100` (credentials from the environment, nothing printed) against the
+real account: **669,881 messages**, the last 30 days enumerated and **100 inserted**, head captured
+before enumeration per E4.2. **9.5 MB** of raw MIME in the content-addressed cache. Subsequent
+`--bench-store` on that store: cold open 1.3 ms, page 0.01/0.02 ms, thread 0.03 ms, unread counts
+0.03 ms.
+
+**Gap found and stated:** the raw fetch carries no labels, so backfilled messages have no mailbox
+yet; filing by label is the sync loop's job (E4.7/E8.6).

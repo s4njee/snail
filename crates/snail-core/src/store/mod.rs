@@ -288,6 +288,51 @@ impl Store {
         })
     }
 
+    /// Insert only if this provider id is new; used by backfill so a re-run converges (E4.23).
+    pub fn insert_message_if_new(&self, message: &NewMessage) -> Result<bool> {
+        match &message.provider {
+            Some(ProviderRef::Gmail { id, .. }) if self.gmail_message_exists(message.account_id, id)? => {
+                return Ok(false);
+            }
+            Some(ProviderRef::Imap { uid, uidvalidity, .. })
+                if self.imap_message_exists(message.account_id, *uid, *uidvalidity)? =>
+            {
+                return Ok(false);
+            }
+            _ => {}
+        }
+        self.insert_message(message)?;
+        Ok(true)
+    }
+
+    pub fn gmail_message_exists(&self, account_id: i64, gmail_id: &str) -> Result<bool> {
+        self.with_db(|conn| {
+            let count: i64 = conn.query_row(
+                "SELECT count(*) FROM message WHERE account_id = ?1 AND provider = 'gmail' AND gmail_id = ?2",
+                params![account_id, gmail_id],
+                |row| row.get(0),
+            )?;
+            Ok(count > 0)
+        })
+    }
+
+    pub fn imap_message_exists(
+        &self,
+        account_id: i64,
+        uid: u32,
+        uidvalidity: u32,
+    ) -> Result<bool> {
+        self.with_db(|conn| {
+            let count: i64 = conn.query_row(
+                "SELECT count(*) FROM message
+                 WHERE account_id = ?1 AND provider = 'imap' AND imap_uid = ?2 AND imap_uidvalidity = ?3",
+                params![account_id, uid as i64, uidvalidity as i64],
+                |row| row.get(0),
+            )?;
+            Ok(count > 0)
+        })
+    }
+
     /// Mailbox page, newest first.
     pub fn page(&self, mailbox_id: i64, limit: u32, offset: u32) -> Result<Vec<MessageRow>> {
         self.with_db(|conn| {
@@ -316,11 +361,15 @@ impl Store {
     /// paint, and E5.9 decrements it optimistically when a message is read. 138 ms vs microseconds.
     pub fn unread_count(&self, mailbox_id: i64) -> Result<i64> {
         self.with_db(|conn| {
-            Ok(conn.query_row(
-                "SELECT unread FROM mailbox WHERE id = ?1",
-                [mailbox_id],
-                |row| row.get(0),
-            )?)
+            use rusqlite::OptionalExtension as _;
+            let unread: Option<i64> = conn
+                .query_row(
+                    "SELECT unread FROM mailbox WHERE id = ?1",
+                    [mailbox_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(unread.unwrap_or(0))
         })
     }
 
@@ -723,6 +772,23 @@ mod tests {
         store.delete_account(1).unwrap();
         assert!(store.accounts().unwrap().is_empty());
         assert!(store.identities(1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn insert_message_if_new_is_idempotent_so_backfill_converges() {
+        let store = store_with_account();
+        let message = NewMessage {
+            account_id: 1,
+            provider: Some(ProviderRef::Gmail {
+                id: "g1".into(),
+                thread_id: None,
+                history_id: None,
+            }),
+            subject: Some("x".into()),
+            ..Default::default()
+        };
+        assert!(store.insert_message_if_new(&message).unwrap());
+        assert!(!store.insert_message_if_new(&message).unwrap(), "re-run must not duplicate");
     }
 
     #[test]

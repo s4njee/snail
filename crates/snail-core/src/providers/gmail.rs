@@ -182,10 +182,498 @@ fn strings(values: &[Value]) -> Vec<String> {
         .collect()
 }
 
+// --- The live client (E4.2, E4.3, E4.7) ------------------------------------------------------
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+use super::{Changes, LabelChange, MailProvider, OpOutcome, RawMessage, RemoteOp};
+use crate::mime;
+use crate::store::{NewMessage, ProviderRef, Store, SyncState};
+
+/// Supplies the current access token; refreshed elsewhere (E3.3).
+pub trait TokenSource: Send + Sync {
+    fn access_token(&self) -> Result<String>;
+}
+
+/// A source that never changes, for tests and short-lived commands.
+pub struct FixedToken(pub String);
+
+impl TokenSource for FixedToken {
+    fn access_token(&self) -> Result<String> {
+        Ok(self.0.clone())
+    }
+}
+
+#[derive(Debug)]
+pub struct GmailError {
+    pub kind: ApiError,
+    pub status: u16,
+    pub message: String,
+}
+
+impl std::fmt::Display for GmailError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "Gmail {} ({:?}): {}", self.status, self.kind, self.message)
+    }
+}
+
+impl std::error::Error for GmailError {}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Profile {
+    pub email: String,
+    pub messages_total: u64,
+    pub threads_total: u64,
+    /// The mailbox head **at request time** — take this before enumerating (E4.2).
+    pub history_id: Option<u64>,
+}
+
+pub fn parse_profile(json: &Value) -> Profile {
+    Profile {
+        email: json.get("emailAddress").and_then(Value::as_str).unwrap_or("").to_string(),
+        messages_total: json.get("messagesTotal").and_then(Value::as_u64).unwrap_or(0),
+        threads_total: json.get("threadsTotal").and_then(Value::as_u64).unwrap_or(0),
+        history_id: json
+            .get("historyId")
+            .and_then(Value::as_str)
+            .and_then(|id| id.parse().ok()),
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MessageList {
+    pub ids: Vec<String>,
+    pub next_page_token: Option<String>,
+    pub estimate: Option<u64>,
+}
+
+pub fn parse_message_list(json: &Value) -> MessageList {
+    MessageList {
+        ids: json
+            .get("messages")
+            .and_then(Value::as_array)
+            .map(|messages| {
+                messages
+                    .iter()
+                    .filter_map(|message| message.get("id").and_then(Value::as_str).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        next_page_token: json.get("nextPageToken").and_then(Value::as_str).map(str::to_string),
+        estimate: json.get("resultSizeEstimate").and_then(Value::as_u64),
+    }
+}
+
+/// The backfill window: the owner chose the last 30 days (plan.md §8 open question 3).
+pub fn backfill_query(days: u32) -> String {
+    format!("newer_than:{days}d")
+}
+
+/// Gmail's `raw` field: standard base64url, occasionally padded.
+pub fn encode_raw(raw: &[u8]) -> String {
+    URL_SAFE_NO_PAD.encode(raw)
+}
+
+pub fn decode_raw(encoded: &str) -> Result<Vec<u8>> {
+    let cleaned: String = encoded.chars().filter(|c| !c.is_whitespace()).collect();
+    let trimmed = cleaned.trim_end_matches('=');
+    URL_SAFE_NO_PAD
+        .decode(trimmed)
+        .or_else(|_| {
+            let standard = trimmed.replace('-', "+").replace('_', "/");
+            base64::engine::general_purpose::STANDARD.decode(standard)
+        })
+        .context("decode Gmail raw")
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BackfillReport {
+    pub enumerated: usize,
+    pub inserted: usize,
+    /// The head taken **before** enumeration, committed only after (E4.2).
+    pub head_history_id: Option<u64>,
+}
+
+pub struct GmailClient {
+    http: reqwest::blocking::Client,
+    tokens: Arc<dyn TokenSource>,
+}
+
+impl GmailClient {
+    pub fn new(tokens: Arc<dyn TokenSource>) -> Result<Self> {
+        let http = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()?;
+        Ok(Self { http, tokens })
+    }
+
+    fn get(&self, url: &str) -> Result<reqwest::blocking::RequestBuilder, GmailError> {
+        let token = self
+            .tokens
+            .access_token()
+            .map_err(|error| GmailError {
+                kind: ApiError::Auth,
+                status: 0,
+                message: error.to_string(),
+            })?;
+        Ok(self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .header(reqwest::header::ACCEPT_ENCODING, "gzip")
+            .header(reqwest::header::USER_AGENT, USER_AGENT))
+    }
+
+    fn get_json(&self, url: &str) -> Result<Value, GmailError> {
+        let response = self.get(url)?.send().map_err(|error| GmailError {
+            kind: ApiError::Other,
+            status: 0,
+            message: error.to_string(),
+        })?;
+        read_json(response)
+    }
+
+    fn post_json(&self, url: &str, body: Value) -> Result<Value, GmailError> {
+        let token = self
+            .tokens
+            .access_token()
+            .map_err(|error| GmailError {
+                kind: ApiError::Auth,
+                status: 0,
+                message: error.to_string(),
+            })?;
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(token)
+            .header(reqwest::header::ACCEPT_ENCODING, "gzip")
+            .header(reqwest::header::USER_AGENT, USER_AGENT)
+            .json(&body)
+            .send()
+            .map_err(|error| GmailError {
+                kind: ApiError::Other,
+                status: 0,
+                message: error.to_string(),
+            })?;
+        read_json(response)
+    }
+
+    pub fn profile(&self) -> Result<Profile> {
+        let json = self.get_json(&profile_url())?;
+        Ok(parse_profile(&json))
+    }
+
+    pub fn list_ids(&self, query: &str, page_token: Option<&str>) -> Result<MessageList> {
+        let mut url = format!("{BASE}/messages?maxResults=500&q={}", urlencode(query));
+        if let Some(token) = page_token {
+            url.push_str("&pageToken=");
+            url.push_str(token);
+        }
+        let json = self.get_json(&url)?;
+        Ok(parse_message_list(&json))
+    }
+
+    pub fn raw_message(&self, id: &str) -> Result<Vec<u8>> {
+        let json = self.get_json(&message_raw_url(id))?;
+        let encoded = json
+            .get("raw")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("message {id} had no raw field"))?;
+        decode_raw(encoded)
+    }
+
+    /// Backfill the last `days` days, **head first** (E4.2), committing the cursor only after the
+    /// whole enumeration succeeds so a crash re-runs from the last committed point (E4.23).
+    pub fn backfill(
+        &self,
+        store: &Store,
+        account_id: i64,
+        mailbox_id: Option<i64>,
+        days: u32,
+        limit: usize,
+    ) -> Result<BackfillReport> {
+        // 1. Head before enumerating. Doing it after silently loses changes (E4.2).
+        let profile = self.profile()?;
+        let head = profile.history_id;
+
+        // 2. Enumerate the window.
+        let query = backfill_query(days);
+        let mut ids = Vec::new();
+        let mut page_token: Option<String> = None;
+        loop {
+            let page = self.list_ids(&query, page_token.as_deref())?;
+            ids.extend(page.ids);
+            if ids.len() >= limit {
+                ids.truncate(limit);
+                break;
+            }
+            match page.next_page_token {
+                Some(token) => page_token = Some(token),
+                None => break,
+            }
+        }
+
+        // 3. Fetch, parse, cache and insert.
+        let mut inserted = 0;
+        for id in &ids {
+            if store.gmail_message_exists(account_id, id)? {
+                continue;
+            }
+            let raw = self.raw_message(id)?;
+            let parsed = mime::parse_raw(&raw).with_context(|| format!("parse message {id}"))?;
+            let raw_hash = store.cache().put(&raw)?;
+            let message = NewMessage {
+                account_id,
+                mailbox_id,
+                provider: Some(ProviderRef::Gmail {
+                    id: id.clone(),
+                    thread_id: None,
+                    history_id: None,
+                }),
+                message_id: parsed.message_id,
+                in_reply_to: parsed.in_reply_to,
+                references: parsed.references,
+                subject: parsed.subject,
+                from_name: parsed.from_name,
+                from_addr: parsed.from_addr,
+                to_json: Some(serde_json::to_string(&parsed.to)?),
+                date: parsed.date,
+                preview: parsed.preview,
+                unread: true,
+                raw_hash: Some(raw_hash),
+                ..Default::default()
+            };
+            if store.insert_message_if_new(&message)? {
+                inserted += 1;
+            }
+        }
+
+        // 4. Commit the head only now.
+        store.set_sync_state(&SyncState {
+            account_id,
+            kind: "gmail".into(),
+            collection: String::new(),
+            history_id: head.map(|id| id as i64),
+            last_sync: Some(now_epoch()),
+            ..Default::default()
+        })?;
+
+        Ok(BackfillReport {
+            enumerated: ids.len(),
+            inserted,
+            head_history_id: head,
+        })
+    }
+}
+
+fn urlencode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            b' ' => out.push_str("%20"),
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+fn now_epoch() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn read_json(response: reqwest::blocking::Response) -> Result<Value, GmailError> {
+    let status = response.status().as_u16();
+    let text = response.text().unwrap_or_default();
+    let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    if !(200..300).contains(&status) {
+        let reason = value
+            .pointer("/error/errors/0/reason")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let domain = value
+            .pointer("/error/errors/0/domain")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let message = value
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or(&text)
+            .to_string();
+        return Err(GmailError {
+            kind: classify(status, reason, domain),
+            status,
+            message,
+        });
+    }
+    Ok(value)
+}
+
+impl MailProvider for GmailClient {
+    fn list_changes(&self, cursor: &SyncState) -> Result<Changes> {
+        let Some(start) = cursor.history_id else {
+            // No cursor yet: the caller must backfill.
+            return Ok(Changes {
+                full_resync: true,
+                ..Default::default()
+            });
+        };
+        let mut changes = Changes::default();
+        let mut page_token: Option<String> = None;
+        let mut page_max: Option<u64> = None;
+        let mut top: Option<u64> = None;
+        loop {
+            let url = history_url(start as u64, page_token.as_deref());
+            let json = match self.get_json(&url) {
+                Ok(json) => json,
+                // A 404 window is routine, not an error (E4.6).
+                Err(error) if error.kind == ApiError::HistoryExpired => {
+                    return Ok(Changes {
+                        full_resync: true,
+                        ..Default::default()
+                    });
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let page = parse_history(&json);
+            if let Some(id) = page.page_max_id {
+                page_max = Some(page_max.map_or(id, |current: u64| current.max(id)));
+            }
+            if page.top_history_id.is_some() {
+                top = page.top_history_id.or(top);
+            }
+            for record in page.records {
+                match record.kind {
+                    RecordKind::Added(id) => changes.added.push(id),
+                    RecordKind::Deleted(id) => changes.deleted.push(id),
+                    RecordKind::LabelsAdded { id, labels } => changes.labels.push(LabelChange {
+                        id,
+                        added: labels,
+                        removed: Vec::new(),
+                    }),
+                    RecordKind::LabelsRemoved { id, labels } => changes.labels.push(LabelChange {
+                        id,
+                        added: Vec::new(),
+                        removed: labels,
+                    }),
+                }
+            }
+            match page.next_page_token {
+                Some(token) => page_token = Some(token),
+                None => break,
+            }
+        }
+        changes.next_cursor = committed_cursor(page_max, top).map(|id| id.to_string());
+        Ok(changes)
+    }
+
+    fn fetch_raw(&self, ids: &[String]) -> Result<Vec<RawMessage>> {
+        let mut messages = Vec::with_capacity(ids.len());
+        for id in ids {
+            messages.push(RawMessage {
+                provider_id: id.clone(),
+                bytes: self.raw_message(id)?,
+            });
+        }
+        Ok(messages)
+    }
+
+    fn apply(&self, ops: &[RemoteOp]) -> Result<Vec<OpOutcome>> {
+        let mut outcomes = Vec::with_capacity(ops.len());
+        for op in ops {
+            let (id, add, remove) = match op {
+                // Gmail's archive is "remove INBOX"; trash is a TRASH label (E8.6).
+                RemoteOp::Archive { id } => (id.clone(), vec![], vec!["INBOX".to_string()]),
+                RemoteOp::Trash { id } => (id.clone(), vec!["TRASH".to_string()], vec![]),
+                RemoteOp::MarkRead { id, read } => (
+                    id.clone(),
+                    if *read { vec![] } else { vec!["UNREAD".to_string()] },
+                    if *read { vec!["UNREAD".to_string()] } else { vec![] },
+                ),
+                RemoteOp::Label { id, add, remove } => (id.clone(), add.clone(), remove.clone()),
+                RemoteOp::Move { id, mailbox } => (id.clone(), vec![mailbox.clone()], vec!["INBOX".to_string()]),
+                RemoteOp::Send { raw } => {
+                    let result = self.send(raw);
+                    outcomes.push(OpOutcome {
+                        id: "send".into(),
+                        ok: result.is_ok(),
+                        terminal: false,
+                        error: result.err().map(|error| error.to_string()),
+                    });
+                    continue;
+                }
+            };
+            let result = self.post_json(
+                &modify_url(&id),
+                serde_json::json!({ "addLabelIds": add, "removeLabelIds": remove }),
+            );
+            outcomes.push(OpOutcome {
+                id,
+                ok: result.is_ok(),
+                terminal: matches!(
+                    result.as_ref().err().map(|error| error.kind),
+                    Some(ApiError::Auth) | Some(ApiError::WorkspaceBlocked)
+                ),
+                error: result.err().map(|error| error.to_string()),
+            });
+        }
+        Ok(outcomes)
+    }
+
+    fn send(&self, raw: &[u8]) -> Result<()> {
+        self.post_json(&send_url(), serde_json::json!({ "raw": encode_raw(raw) }))?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn profile_takes_the_head_at_request_time() {
+        let profile = parse_profile(&json!({
+            "emailAddress": "me@x.com", "messagesTotal": 10, "threadsTotal": 5, "historyId": "999"
+        }));
+        assert_eq!(profile.email, "me@x.com");
+        assert_eq!(profile.messages_total, 10);
+        assert_eq!(profile.history_id, Some(999));
+    }
+
+    #[test]
+    fn message_list_parses_ids_and_paging() {
+        let list = parse_message_list(&json!({
+            "messages": [{"id": "a"}, {"id": "b"}], "nextPageToken": "N", "resultSizeEstimate": 2
+        }));
+        assert_eq!(list.ids, vec!["a", "b"]);
+        assert_eq!(list.next_page_token.as_deref(), Some("N"));
+        assert!(parse_message_list(&json!({})).ids.is_empty());
+    }
+
+    #[test]
+    fn raw_round_trips_and_tolerates_padding() {
+        let raw = b"From: a@b.c\r\n\r\nhello\r\n";
+        let encoded = encode_raw(raw);
+        assert_eq!(decode_raw(&encoded).unwrap(), raw);
+        // Gmail's raw is sometimes padded; the decoder must cope (E0.3).
+        assert_eq!(decode_raw(&format!("{encoded}==")).unwrap(), raw);
+    }
+
+    #[test]
+    fn the_backfill_window_is_the_last_thirty_days() {
+        assert_eq!(backfill_query(30), "newer_than:30d");
+    }
 
     #[test]
     fn the_history_stream_is_never_filtered_by_label() {

@@ -8,7 +8,10 @@ use gpui_kit::*;
 
 use snail_core::fixture::FixtureSpec;
 use snail_core::paths::Paths;
+use snail_core::providers::gmail::{FixedToken, GmailClient};
 use snail_core::store::Store;
+use snail_services::auth::GoogleOAuth;
+use std::sync::Arc;
 
 mod dev_overlay;
 mod frame_stats;
@@ -36,7 +39,7 @@ fn main() {
 
     // Benchmark and fixture modes never open a window (E0.9, E2.9, E17.1).
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|arg| arg == "--generate-fixture" || arg == "--bench-store") {
+    if args.iter().any(|arg| arg == "--generate-fixture" || arg == "--bench-store" || arg == "--backfill-gmail") {
         if let Err(error) = run_store_cli(&paths, &args) {
             eprintln!("{error:#}");
             std::process::exit(1);
@@ -112,6 +115,10 @@ fn main() {
 }
 
 /// The fixture generator and store benchmarks, for `--generate-fixture` and `--bench-store`.
+fn env_var(name: &str) -> anyhow::Result<String> {
+    std::env::var(name).map_err(|_| anyhow::anyhow!("{name} is not set"))
+}
+
 fn run_store_cli(paths: &Paths, args: &[String]) -> anyhow::Result<()> {
     let count = |flag: &str| -> Option<usize> {
         args.iter()
@@ -131,6 +138,32 @@ fn run_store_cli(paths: &Paths, args: &[String]) -> anyhow::Result<()> {
         println!(
             "fixture: {} accounts, {} mailboxes, {} messages, {} events in {} ms",
             report.accounts, report.mailboxes, report.messages, report.events, report.elapsed_ms
+        );
+    }
+
+    if args.iter().any(|arg| arg == "--backfill-gmail") {
+        // A dev command: reads the OAuth client and refresh token from the environment so nothing
+        // secret is ever an argument or a committed file. Proves E4.2/E4.3/E4.22 end to end.
+        let client_id = env_var("SNAIL_GOOGLE_CLIENT_ID")?;
+        let client_secret = env_var("SNAIL_GOOGLE_CLIENT_SECRET")?;
+        let refresh_token = env_var("SNAIL_GOOGLE_REFRESH_TOKEN")?;
+        let oauth = GoogleOAuth::new(client_id, client_secret);
+        let tokens = oauth.refresh(&refresh_token)?;
+
+        let client = GmailClient::new(Arc::new(FixedToken(tokens.access_token)))?;
+        let profile = client.profile()?;
+        println!("authenticated as {} ({} messages)", profile.email, profile.messages_total);
+
+        let store = Store::open(paths)?;
+        let account_id = match store.account_by_address("gmail", &profile.email)? {
+            Some(account) => account.id,
+            None => store.insert_account("gmail", &profile.email, None, 0)?,
+        };
+        let limit = count("--limit").unwrap_or(200);
+        let report = client.backfill(&store, account_id, None, 30, limit)?;
+        println!(
+            "backfill: enumerated {}, inserted {}, head {:?}",
+            report.enumerated, report.inserted, report.head_history_id
         );
     }
 

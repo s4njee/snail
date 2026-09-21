@@ -748,16 +748,19 @@ boundary sits above this epic.*
 *Two implementations behind one `MailProvider` trait. All of it in `snail-core`, driven by
 `snail-services`, invisible to every view.*
 
-*Implemented so far: the `MailProvider` trait (4.1), MIME parsing (4.22), and Gmail's pure logic —
+*Implemented so far: the `MailProvider` trait (4.1), MIME parsing (4.22), Gmail's pure logic —
 `threads.get?format=raw` (4.3), history record parsing and the cursor discipline (4.4–4.6),
-rate-limit/error classification (4.8), the gzip User-Agent (4.9) — plus iCloud folder mapping
-(4.18). The live HTTP/IMAP clients, backfill orchestration, CAPABILITY/CONDSTORE/IDLE, SMTP send and
-the crash-safety tests remain.*
+rate-limit/error classification (4.8), the gzip User-Agent (4.9) — iCloud folder mapping (4.18), and
+the **live Gmail REST client and backfill**, proven end to end on 2026-09-21: 669,881-message
+account, 100 messages of the last 30 days enumerated and inserted, head taken before enumerating
+(4.2), 9.5 MB of raw MIME cached. Remaining: filing each message into a mailbox from its labels (the
+raw fetch carries none), history records applied to the store (4.7), the IMAP client
+(4.10–4.17, 4.19–4.21), SMTP send, and the kill-safety tests (4.23/4.24).*
 
 **Gmail (REST):**
 - [x] 4.1 — `MailProvider` trait: `list_changes(cursor) -> Changes`, `fetch_messages(ids) -> Vec<Raw>`,
       `apply(ops)`, `send(raw)`. Both providers implement it; the store and UI know nothing else.
-- [ ] 4.2 — Initial backfill: take the mailbox head from `getProfile` **before** enumerating, then
+- [x] 4.2 — Initial backfill: take the mailbox head from `getProfile` **before** enumerating, then
       enumerate, then start incremental from that head. Doing it in the other order silently loses
       every change that lands during the backfill — the single most common bug in Gmail clients.
       **Scope the backfill to the last 30 days** (owner, 2026-09-21; §8 open question 3) — a
