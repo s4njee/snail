@@ -10,5 +10,8 @@ description = "Snail's UI-agnostic core: store, MIME, threading, recurrence, PGP
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
+anyhow = { workspace = true }
 dirs = "6"
 env_logger = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"

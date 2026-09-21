@@ -275,9 +275,7 @@ overlay costs nothing (idle-CPU budget, §4). Smoke-tested: `first_frame @ 629 m
 
 ---
 
-## E0.10 — CI matrix
-
-**PASS.** GitHub Actions builds the GPUI binary and runs `cargo test --workspace` on `macos-latest`,
+## E0.10 — CI matrix**PASS.** GitHub Actions builds the GPUI binary and runs `cargo test --workspace` on `macos-latest`,
 `ubuntu-latest` and `windows-latest`, and builds all three spikes on all three. Run `35553496010`
 (2026-09-21) is green across all six jobs. The Ubuntu runner installs the Vulkan loader plus the
 X11/Wayland/font/clang build deps; a first attempt failed to link `-lxkbcommon-x11` because the

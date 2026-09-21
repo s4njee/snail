@@ -13,3 +13,8 @@ serde_json = { workspace = true }
 log = { workspace = true }
 anyhow = { workspace = true }
 futures = { workspace = true }
+keyring = { version = "3", features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+] }

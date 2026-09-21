@@ -2,3 +2,5 @@
 //!
 //! Sync scheduling, account/secret storage, settings, notifications, the `Hub<T>` event bus and
 //! attachment/temp-file handling (plan.md §2).
+
+pub mod secrets;

@@ -552,9 +552,10 @@ its own workspace so the app's lockfile is untouched, and each writes its result
 - [x] 0.8 — Dev overlay: frame p50/p99 from gpui-kit's `profiler` feature, visible row count, last
       sync duration, store size, RSS. Every later budget is read off this. *(Done; `SNAIL_OVERLAY=1`
       or F2. Row/store/sync are placeholders until E2/E4.)*
-- [ ] 0.9 — Fixture generator: a synthetic store with 200k messages across 8 mailboxes and 20k
+- [x] 0.9 — Fixture generator: a synthetic store with 200k messages across 8 mailboxes and 20k
       events, plus a `--fixture` mode that points the app at it. All list and search benchmarks run
-      against this, never against the real mailbox.
+      against this, never against the real mailbox. *(Done; `snail --generate-fixture` writes it in
+      ~3 s, `--bench-store` reports. Deterministic, so `--bench-compare` is meaningful.)*
 - [x] 0.10 — CI matrix from day one: GitHub Actions on `macos-latest`, `ubuntu-latest`,
       `windows-latest`, building **the GPUI binary itself** on all three (the reference project's
       CI only builds it on macOS, and that is explicitly the gap to not repeat) plus
@@ -631,36 +632,39 @@ its own workspace so the app's lockfile is untouched, and each writes its result
 
 ### E2 — The local store
 
-- [ ] 2.1 — SQLite schema v1 as one `CREATE TABLE IF NOT EXISTS` batch plus `meta(key, value)`
+- [x] 2.1 — SQLite schema v1 as one `CREATE TABLE IF NOT EXISTS` batch plus `meta(key, value)`
       versioning and a migration test that walks v1→v2 on a fixture. Tables: `account`, `mailbox`,
       `message`, `message_part`, `thread`, `attachment`, `label`, `message_label`, `pending_op`,
       `calendar`, `event`, `event_exception`, `reminder`, `task`, `sync_state`.
-- [ ] 2.2 — `message` carries both provider identities without either leaking upward: Gmail's
+- [x] 2.2 — `message` carries both provider identities without either leaking upward: Gmail's
       `id`/`thread_id`/`history_id` and IMAP's `uid`/`uidvalidity`/`modseq` live in nullable
       columns behind one `ProviderRef`. RFC822 `Message-ID`, `In-Reply-To` and `References` are
       stored for every account kind because threading needs them regardless.
-- [ ] 2.3 — Body storage: headers and a plain-text preview in SQLite; **full bodies and attachments
+- [x] 2.3 — Body storage: headers and a plain-text preview in SQLite; **full bodies and attachments
       as content-addressed files in the cache dir**, referenced by hash. Keeps the DB small enough
       to stay fast and makes "clear cache" a directory delete. A missing cache file re-fetches
       rather than erroring.
-- [ ] 2.4 — Connection handling: one `rusqlite` connection behind a `Mutex`, WAL mode, accessed only
+- [x] 2.4 — Connection handling: one `rusqlite` connection behind a `Mutex`, WAL mode, accessed only
       from the background executor via `store.with_db(|db| ...)`. A `#[test]` that fails if any
       store call is reachable from a view module.
-- [ ] 2.5 — `pending_op` queue: every local mutation (mark read, archive, trash, label, send, event
+- [x] 2.5 — `pending_op` queue: every local mutation (mark read, archive, trash, label, send, event
       create/update/delete, RSVP) is written as a row with account, target, operation, attempt
       count and an idempotency key **in the same transaction as the optimistic local change**.
       Survives restart; drains when online; surfaces as "N changes pending" in the sync footer.
-- [ ] 2.6 — `sync_state` per (account, kind): Gmail `historyId`, Google Calendar `syncToken`, IMAP
+- [x] 2.6 — `sync_state` per (account, kind): Gmail `historyId`, Google Calendar `syncToken`, IMAP
       `uidvalidity`+`highestmodseq`, CalDAV `sync-token`/`ctag`. Plus a `full_resync_needed` flag,
       because every one of these can be invalidated by the server and the recovery path must be a
       first-class state rather than an error.
-- [ ] 2.7 — Settings store: versioned JSON, one file per section (`theme`, `layout`, `accounts`,
+- [x] 2.7 — Settings store: versioned JSON, one file per section (`theme`, `layout`, `accounts`,
       `mail`, `calendar`, `pgp`), atomic temp+rename writes, warn-and-default on a bad value.
-- [ ] 2.8 — Secret store over `keyring`: OAuth refresh tokens, iCloud app-specific passwords, PGP
+- [x] 2.8 — Secret store over `keyring`: OAuth refresh tokens, iCloud app-specific passwords, PGP
       passphrase. One trait so tests use an in-memory backend. Handles the "no keyring daemon"
       Linux case with a clear error rather than a panic — see §6.
-- [ ] 2.9 — Store benchmarks against the E0.9 fixture: cold open, mailbox page query, thread
-      assembly, unread counts. Budgets in §4.
+- [x] 2.9 — Store benchmarks against the E0.9 fixture: cold open, mailbox page query, thread
+      assembly, unread counts. Budgets in §4. *(Measured 2026-09-21 on the 200k fixture: cold open
+      2.0 ms, mailbox page p50/p99 0.11 / 3.80 ms, thread assemble 0.58 ms, unread counts 0.23 ms —
+      the last only after finding that `count(*)` took **138 ms**; the sidebar reads the `unread`
+      counter instead. Fixture: 96 MB for 200k messages.)*
 
 ### E3 — Accounts and authentication
 *Gated on the E0.4 spike. The two providers share nothing here, which is exactly why the trait
