@@ -3,6 +3,7 @@
 
 pub mod schema;
 
+#[cfg(test)]
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -114,6 +115,34 @@ pub struct SyncState {
     pub ctag: Option<String>,
     pub full_resync_needed: bool,
     pub last_sync: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccountRow {
+    pub id: i64,
+    pub kind: String,
+    pub address: String,
+    pub display_name: Option<String>,
+}
+
+/// Send-as identities hang off an account (E3.4c), not the other way around.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewIdentity {
+    pub account_id: i64,
+    pub address: String,
+    pub display_name: Option<String>,
+    pub signature: Option<String>,
+    pub is_default: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct IdentityRow {
+    pub id: i64,
+    pub account_id: i64,
+    pub address: String,
+    pub display_name: Option<String>,
+    pub signature: Option<String>,
+    pub is_default: bool,
 }
 
 pub struct Store {
@@ -452,6 +481,89 @@ impl Store {
             }
         })
     }
+    pub fn accounts(&self) -> Result<Vec<AccountRow>> {
+        self.with_db(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT id, kind, address, display_name FROM account ORDER BY id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok(AccountRow {
+                    id: row.get(0)?,
+                    kind: row.get(1)?,
+                    address: row.get(2)?,
+                    display_name: row.get(3)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    pub fn account_by_address(&self, kind: &str, address: &str) -> Result<Option<AccountRow>> {
+        self.with_db(|conn| {
+            use rusqlite::OptionalExtension as _;
+            let row = conn
+                .query_row(
+                    "SELECT id, kind, address, display_name FROM account
+                     WHERE kind = ?1 AND address = ?2",
+                    params![kind, address],
+                    |row| {
+                        Ok(AccountRow {
+                            id: row.get(0)?,
+                            kind: row.get(1)?,
+                            address: row.get(2)?,
+                            display_name: row.get(3)?,
+                        })
+                    },
+                )
+                .optional()?;
+            Ok(row)
+        })
+    }
+
+    pub fn insert_identity(&self, identity: &NewIdentity) -> Result<i64> {
+        self.with_db(|conn| {
+            conn.execute(
+                "INSERT INTO identity (account_id, address, display_name, signature, is_default)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    identity.account_id,
+                    identity.address,
+                    identity.display_name,
+                    identity.signature,
+                    identity.is_default as i64,
+                ],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+    }
+
+    pub fn identities(&self, account_id: i64) -> Result<Vec<IdentityRow>> {
+        self.with_db(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT id, account_id, address, display_name, signature, is_default
+                 FROM identity WHERE account_id = ?1 ORDER BY is_default DESC, id",
+            )?;
+            let rows = statement.query_map([account_id], |row| {
+                Ok(IdentityRow {
+                    id: row.get(0)?,
+                    account_id: row.get(1)?,
+                    address: row.get(2)?,
+                    display_name: row.get(3)?,
+                    signature: row.get(4)?,
+                    is_default: row.get::<_, i64>(5)? != 0,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// Remove an account and everything that cascades from it (E14.9).
+    pub fn delete_account(&self, account_id: i64) -> Result<()> {
+        self.with_db(|conn| {
+            conn.execute("DELETE FROM account WHERE id = ?1", [account_id])?;
+            Ok(())
+        })
+    }
 }
 
 fn configure(conn: &Connection) -> Result<()> {
@@ -572,6 +684,45 @@ mod tests {
             })
             .unwrap();
         assert!(store.get_sync_state(1, "gmail", "").unwrap().unwrap().full_resync_needed);
+    }
+
+    #[test]
+    fn accounts_and_identities_round_trip() {
+        let store = store_with_account();
+        assert_eq!(store.accounts().unwrap().len(), 1);
+        assert_eq!(
+            store.account_by_address("gmail", "me@example.com").unwrap().unwrap().id,
+            1
+        );
+        store
+            .insert_identity(&NewIdentity {
+                account_id: 1,
+                address: "alias@icloud.com".into(),
+                display_name: Some("Me".into()),
+                signature: None,
+                is_default: false,
+            })
+            .unwrap();
+        let identities = store.identities(1).unwrap();
+        assert_eq!(identities.len(), 1);
+        assert_eq!(identities[0].address, "alias@icloud.com");
+    }
+
+    #[test]
+    fn deleting_an_account_cascades_to_its_identities_and_messages() {
+        let store = store_with_account();
+        store
+            .insert_identity(&NewIdentity {
+                account_id: 1,
+                address: "a@b.c".into(),
+                display_name: None,
+                signature: None,
+                is_default: true,
+            })
+            .unwrap();
+        store.delete_account(1).unwrap();
+        assert!(store.accounts().unwrap().is_empty());
+        assert!(store.identities(1).unwrap().is_empty());
     }
 
     #[test]

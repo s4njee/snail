@@ -8,7 +8,7 @@ use anyhow::Result;
 use rusqlite::params;
 use std::time::Instant;
 
-use crate::store::{ProviderRef, Store};
+use crate::store::Store;
 
 #[derive(Clone, Copy, Debug)]
 pub struct FixtureSpec {

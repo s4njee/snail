@@ -670,7 +670,7 @@ its own workspace so the app's lockfile is untouched, and each writes its result
 *Gated on the E0.4 spike. The two providers share nothing here, which is exactly why the trait
 boundary sits above this epic.*
 
-- [ ] 3.1 — Google OAuth 2.0 for installed apps, client type **Desktop app**: **loopback redirect**
+- [x] 3.1 — Google OAuth 2.0 for installed apps, client type **Desktop app**: **loopback redirect**
       to `http://127.0.0.1:<port>` on a random free port, with **PKCE**, opened in the **system
       browser**. Google's policy forbids embedded user-agents (this has broken shipped clients), and
       the OOB copy-paste flow has been fully blocked since 2023-01-31. A transient local HTTP server
@@ -686,7 +686,7 @@ boundary sits above this epic.*
         policy page separately says credentials must *never* be committed to a public repo, with no
         installed-app exception, so if this repo ever goes public the secret should be injected at
         build time rather than committed.
-- [ ] 3.1b — **Guard against OAuth client auto-deletion.** Since June 2025 Google deletes OAuth
+- [x] 3.1b — **Guard against OAuth client auto-deletion.** Since June 2025 Google deletes OAuth
       clients unused for 6 months (restorable for 30 days), warning by email to the project owner —
       i.e. the address nobody reads on a side project. A deleted client fails every existing refresh
       token with `deleted_client`. Since Snail is used daily this should never trigger, but the
@@ -694,7 +694,7 @@ boundary sits above this epic.*
       like a generic auth failure. Also note secrets are now hashed and shown **once** at creation —
       record it in the password manager immediately, because the console will only ever show the
       last four characters again.
-- [ ] 3.2 — Scope decision, made once and written down (§6): **Gmail REST API with `gmail.modify`
+- [x] 3.2 — Scope decision, made once and written down (§6): **Gmail REST API with `gmail.modify`
       and `gmail.labels`, plus `calendar` and `calendar.events`.** Not IMAP-against-Gmail. Both
       routes are equally *restricted* for verification purposes, so the choice is on merits:
       `history.list` delta sync is far cheaper and more reliable than IMAP CONDSTORE, there is no
@@ -702,7 +702,10 @@ boundary sits above this epic.*
       Gmail and iCloud need two different sync implementations, which E4 accepts by design.
 - [ ] 3.3 — Token lifecycle: refresh tokens in the OS keychain, refreshed on a background task
       ahead of expiry, with a distinct terminal state for revoked/expired that prompts once.
-      Verify the day-8 behaviour from E0.6 empirically before relying on it.
+      Verify the day-8 behaviour from E0.6 empirically before relying on it. *(Done:
+      `GoogleOAuth::refresh` and keychain storage of the refresh token via `AccountStore`.
+      Remaining: the background refresh-ahead task and the once-only revoked prompt, which land
+      with E16.9; the day-8 check itself is E0.6.)*
 - [ ] 3.4 — iCloud authentication: **app-specific password**, entered once and stored in the
       keychain. There is no OAuth available to third parties — iCloud IMAP advertises only
       `AUTH=ATOKEN` and `AUTH=PLAIN`, and `ATOKEN` is Apple's undocumented partner-only delegated
@@ -712,29 +715,34 @@ boundary sits above this epic.*
       mandatory** on the Apple Account; there is a **25 active password limit**; and — the one that
       produces mystifying support cases — **changing the Apple Account password silently revokes
       every app-specific password**. That last case must produce "your app password was revoked,
-      generate a new one", never a generic auth failure.
-- [ ] 3.4b — Username asymmetry, which Apple documents and every client gets wrong once: the
+      generate a new one", never a generic auth failure. *(Done: storage in the keychain, plus
+      distinct wrong-password and revoked messages. Remaining: the setup copy itself, in E14.3's
+      add-account flow.)*
+- [x] 3.4b — Username asymmetry, which Apple documents and every client gets wrong once: the
       **IMAP** username is the *name part only* (`johnappleseed`), the **SMTP** username is the
       *full address* (`johnappleseed@icloud.com`). Try the full address first on both and fall back
       to the local part on IMAP auth failure, and keep the field user-editable — `@me.com`/`@mac.com`
       legacy accounts are under-documented here.
-- [ ] 3.4c — **Identities are separate from accounts.** iCloud+ custom domains and `@me.com`/
+- [x] 3.4c — **Identities are separate from accounts.** iCloud+ custom domains and `@me.com`/
       `@mac.com` aliases are additional send-as addresses on one credential, not separate accounts.
       Model a `identity` table (display name, address, signature, default) hanging off `account`
       from the first commit; retrofitting this is painful.
 - [ ] 3.5 — iCloud endpoint discovery rather than hardcoding: IMAP and SMTP hosts, and CalDAV via
       `/.well-known/caldav` → current-user-principal → calendar-home-set. Hardcoded values are the
       fallback, not the primary path. *(The design handoff's own account card already shows
-      `caldav.icloud.com`.)*
-- [ ] 3.6 — Distinct, actionable errors for every auth failure mode, because "login failed" is
+      `caldav.icloud.com`.)* *(Not started: the E0.4 spike proved the CalDAV discovery chain
+      end to end — PROPFIND `.well-known`, principal, sharded home; formalizing IMAP/SMTP/CalDAV
+      discovery with a hardcoded fallback is outstanding.)*
+- [x] 3.6 — Distinct, actionable errors for every auth failure mode, because "login failed" is
       useless here: wrong app password, 2FA not enabled on the Apple ID, Google token revoked,
       Google consent withdrawn, Workspace admin has disabled the app or allowlisted other OAuth
       clients, network unreachable, and clock skew (which breaks OAuth and is invisible otherwise).
-- [ ] 3.7 — Multi-account from the start — not retrofitted. Every store row, every sync cursor and
+- [x] 3.7 — Multi-account from the start — not retrofitted. Every store row, every sync cursor and
       every view is account-scoped from the first commit, and the fixture has two accounts.
 - [ ] 3.8 — Keyring failure handling: on Linux with no Secret Service available, say so clearly and
       offer an explicit, clearly-labelled encrypted-file fallback rather than crashing or silently
-      storing plaintext.
+      storing plaintext. *(Partial: a missing keychain maps to a clear, actionable error. Remaining:
+      the encrypted-file fallback.)*
 
 ### E4 — Mail sync
 *Two implementations behind one `MailProvider` trait. All of it in `snail-core`, driven by
