@@ -748,8 +748,14 @@ boundary sits above this epic.*
 *Two implementations behind one `MailProvider` trait. All of it in `snail-core`, driven by
 `snail-services`, invisible to every view.*
 
+*Implemented so far: the `MailProvider` trait (4.1), MIME parsing (4.22), and Gmail's pure logic —
+`threads.get?format=raw` (4.3), history record parsing and the cursor discipline (4.4–4.6),
+rate-limit/error classification (4.8), the gzip User-Agent (4.9) — plus iCloud folder mapping
+(4.18). The live HTTP/IMAP clients, backfill orchestration, CAPABILITY/CONDSTORE/IDLE, SMTP send and
+the crash-safety tests remain.*
+
 **Gmail (REST):**
-- [ ] 4.1 — `MailProvider` trait: `list_changes(cursor) -> Changes`, `fetch_messages(ids) -> Vec<Raw>`,
+- [x] 4.1 — `MailProvider` trait: `list_changes(cursor) -> Changes`, `fetch_messages(ids) -> Vec<Raw>`,
       `apply(ops)`, `send(raw)`. Both providers implement it; the store and UI know nothing else.
 - [ ] 4.2 — Initial backfill: take the mailbox head from `getProfile` **before** enumerating, then
       enumerate, then start incremental from that head. Doing it in the other order silently loses
@@ -757,21 +763,21 @@ boundary sits above this epic.*
       **Scope the backfill to the last 30 days** (owner, 2026-09-21; §8 open question 3) — a
       669,873-message mailbox makes a full pull a ~37-hour floor (§6.5) — with older mail fetched on
       demand. Head-first ordering still applies within the window.
-- [ ] 4.3 — Fetch bodies as **`threads.get?format=raw`** and store the original RFC822 bytes.
+- [x] 4.3 — Fetch bodies as **`threads.get?format=raw`** and store the original RFC822 bytes.
       Rationale: 40 units per thread beats 20 × N messages at 3+ messages per thread; byte fidelity
       is required for PGP signature verification (E10) and for round-tripping; and it makes
       `messages.attachments.get` unnecessary because the attachment bytes are already in the MIME
       we hold. Parse locally with `mail-parser`.
-- [ ] 4.4 — Incremental sync via `history.list` (2 units per page, so idle polling is essentially
+- [x] 4.4 — Incremental sync via `history.list` (2 units per page, so idle polling is essentially
       free). **Cursor discipline, which is where this goes wrong:** page through the whole chain,
       commit only after the last page, and prefer `max(History.id)` actually processed, falling back
       to the response's top-level `historyId` only when `history[]` came back empty. The top-level
       `historyId` is the mailbox head *at request time*, not the last record on the page — storing
       it mid-pagination loses changes.
-- [ ] 4.5 — Run **one unfiltered history stream per account**; never pass `labelId`. A filtered
+- [x] 4.5 — Run **one unfiltered history stream per account**; never pass `labelId`. A filtered
       cursor advances more slowly than the mailbox, so a quiet label goes stale and then expires.
       Filter locally.
-- [ ] 4.6 — **HTTP 404 from `history.list` is a first-class state, not an error.** Google documents
+- [x] 4.6 — **HTTP 404 from `history.list` is a first-class state, not an error.** Google documents
       history as valid "typically at least a week" but "in some rare circumstances may be valid for
       only a few hours" — a laptop closed over a weekend is inside the documented failure envelope.
       A 404 can also arrive mid-pagination as the window slides. Both abandon the chain without
@@ -781,13 +787,13 @@ boundary sits above this epic.*
       expunge only — **not** trash), `labelsAdded`, `labelsRemoved`. Trash and untrash arrive as
       label changes of `TRASH`. Label-change records carry `labelIds` inline, so they need no
       follow-up fetch at all.
-- [ ] 4.8 — Rate-limit handling against the **current** (post-2026-05-01) quota model: 6,000
+- [x] 4.8 — Rate-limit handling against the **current** (post-2026-05-01) quota model: 6,000
       units/min/user, 1.2M/min/project, and an 80M/day project ceiling that cannot be raised.
       Retryable is 403 with `domain == "usageLimits"`, 429, and 5xx; 403 `domainPolicy` is terminal
       and means a Workspace admin blocked the app, which needs its own message. Also handle the
       undocumented per-user **concurrent request** 429 — Snail competes with the user's phone for
       it — with the adaptive limiter from E16.4.
-- [ ] 4.9 — Enable gzip properly: `Accept-Encoding` **and** a User-Agent containing the literal
+- [x] 4.9 — Enable gzip properly: `Accept-Encoding` **and** a User-Agent containing the literal
       string `gzip` (e.g. `snail/0.1 (gzip)`). Google silently disables compression without the
       second half, which is easy to miss and expensive on a raw-MIME backfill.
 
@@ -826,7 +832,7 @@ boundary sits above this epic.*
       **but verify first whether iCloud already files it server-side** (E0.4), because doing both
       gives the user duplicate sent mail. Gmail's REST `messages.send` files it automatically. This
       is a real behavioural difference the trait must hide.
-- [ ] 4.18 — Folder mapping **by name, not by flag**: verified 2026-09-21 (E0.4), iCloud **does**
+- [x] 4.18 — Folder mapping **by name, not by flag**: verified 2026-09-21 (E0.4), iCloud **does**
       advertise SPECIAL-USE on two of the five — `Sent Messages [\Sent]` and `Deleted Messages
       [\Trash]` — so flag discovery covers those, but `Archive`, `Junk`, `Notes` and `Drafts` carry
       no attribute and need name mapping. iCloud's names are also non-standard — `Sent Messages` and
@@ -847,7 +853,7 @@ boundary sits above this epic.*
       a distinct, backoff-triggering error.
 
 **Both:**
-- [ ] 4.22 — MIME parsing with `mail-parser` (Apache-2.0/MIT, actively maintained, zero-copy, and
+- [x] 4.22 — MIME parsing with `mail-parser` (Apache-2.0/MIT, actively maintained, zero-copy, and
       it implements RFC 8621 §4.1.4 body-part selection — exactly the "give me the display body"
       logic this app needs). Charset decoding through `encoding_rs`/`charset` for the legacy
       encodings real mail still carries.

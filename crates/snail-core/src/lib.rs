@@ -5,6 +5,8 @@
 
 pub mod cache;
 pub mod fixture;
+pub mod mime;
 pub mod paths;
+pub mod providers;
 pub mod settings;
 pub mod store;

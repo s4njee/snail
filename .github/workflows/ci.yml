@@ -38,7 +38,7 @@ jobs:
             libxcb-composite0-dev libxcb-damage0-dev libxcb-present-dev \
             libxrandr-dev libxi-dev libxcursor-dev libxext-dev \
             libfontconfig1-dev libfreetype6-dev \
-            libasound2-dev libssl-dev libsqlite3-dev libzstd-dev \
+            libasound2-dev libssl-dev libsqlite3-dev libzstd-dev libdbus-1-dev \
             pkg-config cmake clang libclang-dev
 
       - name: Install Rust (pinned to what built on macOS)
@@ -79,7 +79,7 @@ jobs:
             libxcb-composite0-dev libxcb-damage0-dev libxcb-present-dev \
             libxrandr-dev libxi-dev libxcursor-dev libxext-dev \
             libfontconfig1-dev libfreetype6-dev \
-            libasound2-dev libssl-dev libsqlite3-dev libzstd-dev \
+            libasound2-dev libssl-dev libsqlite3-dev libzstd-dev libdbus-1-dev \
             pkg-config cmake clang libclang-dev
 
       - name: Install Rust
