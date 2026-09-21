@@ -1,0 +1,90 @@
+name: CI
+
+# E0.10: GitHub Actions on macOS, Linux and Windows, building the GPUI binary itself on all three
+# (the reference project's CI only built it on macOS, and that is explicitly the gap not to repeat),
+# plus `cargo test --workspace`.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ubuntu needs the Vulkan *loader* (not the SDK) plus the X11/Wayland/font/portal build deps
+      # GPUI and wgpu link against (plan.md §1.2, §18.4). BUILDING.md will refine this list.
+      - name: Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libvulkan1 vulkan-tools \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libx11-dev libx11-xcb-dev libxcb1-dev \
+            libxcb-randr0-dev libxcb-shm0-dev libxcb-xfixes0-dev libxcb-xkb-dev \
+            libxcb-composite0-dev libxcb-damage0-dev libxcb-present-dev \
+            libxrandr-dev libxi-dev libxcursor-dev libxext-dev \
+            libfontconfig1-dev libfreetype6-dev \
+            libasound2-dev libssl-dev libsqlite3-dev libzstd-dev \
+            pkg-config cmake clang libclang-dev
+
+      - name: Install Rust (pinned to what built on macOS)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Builds the GPUI binary as well as the library crates — the whole workspace.
+      - name: cargo build --workspace
+        run: cargo build --workspace --locked
+
+      - name: cargo test --workspace
+        run: cargo test --workspace --locked
+
+  # The spikes are separate workspaces with their own lockfiles, so they get their own build. They
+  # only need to compile here; the interactive verdicts are recorded in spikes/RESULTS.md.
+  spikes:
+    name: spikes (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libvulkan1 libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev \
+            libfontconfig1-dev libasound2-dev libssl-dev \
+            pkg-config clang libclang-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+
+      - name: Build E0.2 (gpui-kit Input/Textarea)
+        working-directory: spikes/e0.2
+        run: cargo build
+
+      - name: Build E0.4 (auth spike)
+        working-directory: spikes/e0.4
+        run: cargo build

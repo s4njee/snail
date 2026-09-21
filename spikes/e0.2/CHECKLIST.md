@@ -19,8 +19,8 @@ pre-filled with 40 wrapped lines. Delivered events are shown in the strip at the
 ## Interactive (needs a human at the keyboard)
 
 - [ ] Tab moves To → Cc → Subject → body and back; focus is visibly correct.
-- [ ] Select-all / copy / paste / cut / undo / redo work in every field
-      (`⌘A ⌘C ⌘V ⌘X ⌘Z ⇧⌘Z`, `Ctrl+…` elsewhere).
+- [x] Select-all / copy / paste / cut / undo / redo work in every field
+      (`⌘A ⌘C ⌘V ⌘X ⌘Z ⇧⌘Z`, `Ctrl+…` elsewhere). **macOS confirmed 2026-09-21.**
 - [ ] Placeholder shows when empty and disappears on first keystroke.
 - [ ] Focus and Blur events appear in the event strip when tabbing in and out.
 - [ ] The 40-line body soft-wraps rather than scrolling horizontally; caret movement at wrap works.

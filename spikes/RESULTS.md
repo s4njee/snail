@@ -66,6 +66,9 @@ API surface recorded from the 0.6.4 source (this supersedes what the plan assume
 Run `spikes/e0.2/CHECKLIST.md` for the tab order, clipboard/undo, wrap and CJK-IME pass on macOS,
 Linux and Windows. **The go/no-go stands until that is filled in.**
 
+**Interactive result, macOS, 2026-09-21 (owner):** select-all / copy / paste / cut / undo / redo
+**work**. The remaining go/no-go question is CJK IME composition, plus tab order and soft wrap.
+
 ---
 
 ## E0.5 — app identity and paths

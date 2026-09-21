@@ -733,6 +733,9 @@ boundary sits above this epic.*
 - [ ] 4.2 — Initial backfill: take the mailbox head from `getProfile` **before** enumerating, then
       enumerate, then start incremental from that head. Doing it in the other order silently loses
       every change that lands during the backfill — the single most common bug in Gmail clients.
+      **Scope the backfill to the last 30 days** (owner, 2026-09-21; §8 open question 3) — a
+      669,873-message mailbox makes a full pull a ~37-hour floor (§6.5) — with older mail fetched on
+      demand. Head-first ordering still applies within the window.
 - [ ] 4.3 — Fetch bodies as **`threads.get?format=raw`** and store the original RFC822 bytes.
       Rationale: 40 units per thread beats 20 × N messages at 3+ messages per thread; byte fidelity
       is required for PGP signature verification (E10) and for round-tripping; and it makes
@@ -1690,8 +1693,11 @@ All permissively licensed (MIT / Apache-2.0 / ISC), all checked 2026-09-20.
 2. **Attachment storage policy.** Download everything on sync, or lazily on open? Lazy is lighter
    and faster to first sync; eager makes offline genuinely offline. Affects E2.3 and the backfill
    arithmetic in §6.5.
-3. **How much history to backfill.** All of it, or the last N years with older mail fetched on
-   demand? §6.5's 167-minute floor for 50k messages makes this a real UX decision, not a detail.
+3. **How much history to backfill.** **Resolved by the owner 2026-09-21: the last 30 days.**
+   Older mail is fetched on demand. §6.5's revised arithmetic (669,873 messages → a ~37-hour
+   ~full-backfill floor) is why. **Consequence to state in the UI:** local FTS5 search only covers
+   the backfilled window, so "search" means "search the last 30 days" until on-demand fetch lands
+   in E9 — the empty-result copy must not imply the message does not exist.
 4. **The "Other" platform note** from the scoping questions never reached me — if there was a
    specific platform requirement beyond macOS-first with Linux and Windows green, it is not in
    this plan.
