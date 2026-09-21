@@ -1003,9 +1003,11 @@ window, not a modal) with To/Cc/Subject `Input`s and a body `Textarea`, opened w
 (reply), **f** (forward), or the Reply/Forward buttons in the reading header. Send builds the raw
 message, puts it in the content-addressed cache, and **parks a `send` op in `pending_op`** (7.10/7.11
 first half) — with no account token wired yet, nothing leaves the machine. Remaining: recipient tokens
-(7.2), contacts autocomplete (7.3), the inline reply box (7.5), draft autosave (7.6), attachments
-(7.7), an HTML format bar (7.8), the signature (7.9), the undo-send countdown (7.10), and actually
-dispatching sends per provider (7.11/7.12).*
+(7.2), contacts autocomplete (7.3), the inline reply box (7.5), attachments (7.7), an HTML format bar
+(7.8), the signature (7.9), and dispatching sends per provider (7.11/7.12).* 
+*(Added 2026-09-21: draft autosave — composed drafts are written to the Drafts mailbox on a one-second
+debounce with a "Draft saved" indicator (7.6); and undo send — Send holds for a 10-second window with
+a live countdown and Undo before the op is queued and the draft removed (7.10).)*
 
 - [x] 7.1 — Compose window as a second GPUI window (not a modal) so it survives navigation. From
       picker, To/Cc/Bcc, Subject, body, format bar, Send. Built on whatever E0.2 concluded about
@@ -1020,7 +1022,7 @@ dispatching sends per provider (7.11/7.12).*
       forwarded-message attachment handling.
 - [ ] 7.5 — Inline reply box in the thread view (handoff 1b): collapsed placeholder that expands in
       place, promotable to the full compose window without losing the draft.
-- [ ] 7.6 — Draft autosave to the local store on a debounce, with the handoff's "Draft saved"
+- [x] 7.6 — Draft autosave to the local store on a debounce, with the handoff's "Draft saved"
       indicator; drafts survive a crash and appear in the Drafts mailbox. **Remote draft sync is
       explicitly out of scope for v1** — local drafts only, stated so the gap is deliberate.
 - [ ] 7.7 — Attachments: add via portal/native picker, drag-and-drop onto the compose window, size
@@ -1029,7 +1031,7 @@ dispatching sends per provider (7.11/7.12).*
       bar (bold, italic, list, link). **The renderer of our own HTML is E6's; keep the generated
       markup trivially simple** so replies are readable in every other client.
 - [ ] 7.9 — Signature from settings, serif per the handoff, inserted above the quote on reply.
-- [ ] 7.10 — Undo send: configurable window (default 10s), the message parked in `pending_op` with
+- [x] 7.10 — Undo send: configurable window (default 10s), the message parked in `pending_op` with
       a visible countdown and Undo, dispatched only when it expires. Nothing leaves the machine
       during the window.
 - [ ] 7.11 — Send path per provider behind the `MailProvider` trait, with the sent copy landing in

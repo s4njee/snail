@@ -403,9 +403,95 @@ impl Store {
         }
     }
 
-    /// A single message row by id, for the reading pane header.
-    pub fn message(&self, message_id: i64) -> Result<Option<MessageRow>> {
+    /// Insert or update a local draft (E7.6). Drafts are messages in the Drafts mailbox with
+    /// provider `local`, so they show up in the mailbox like anything else. Returns the message id
+    /// to reuse on the next autosave.
+    pub fn save_draft(
+        &self,
+        draft_id: Option<i64>,
+        account_id: i64,
+        subject: &str,
+        body_text: &str,
+        to_json: &str,
+        raw_hash: Option<&str>,
+        now: i64,
+    ) -> Result<i64> {
+        let preview = crate::mime::collapse(body_text, 120);
         self.with_db(|conn| {
+            if let Some(id) = draft_id {
+                conn.execute(
+                    "UPDATE message SET subject = ?2, preview = ?3, to_json = ?4, raw_hash = ?5,
+                        date = ?6 WHERE id = ?1",
+                    params![id, subject, preview, to_json, raw_hash, now],
+                )?;
+                return Ok(id);
+            }
+            conn.execute(
+                "INSERT OR IGNORE INTO mailbox (account_id, name, kind) VALUES (?1, 'Drafts', 'drafts')",
+                params![account_id],
+            )?;
+            let mailbox: i64 = conn.query_row(
+                "SELECT id FROM mailbox WHERE account_id = ?1 AND name = 'Drafts'",
+                params![account_id],
+                |row| row.get(0),
+            )?;
+            conn.execute(
+                "INSERT INTO message (
+                    account_id, mailbox_id, provider, gmail_id, subject, preview, to_json,
+                    raw_hash, date, unread
+                 ) VALUES (?1, ?2, 'local', ?3, ?4, ?5, ?6, ?7, ?8, 0)",
+                params![
+                    account_id,
+                    mailbox,
+                    format!("draft-{now}"),
+                    subject,
+                    preview,
+                    to_json,
+                    raw_hash,
+                    now
+                ],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+    }
+
+    /// Delete a message (a discarded draft, or a permanently expunged one).
+    pub fn delete_message(&self, message_id: i64) -> Result<()> {
+        self.with_db(|conn| {
+            conn.execute("DELETE FROM message WHERE id = ?1", [message_id])?;
+            Ok(())
+        })
+    }
+
+    /// The most recent draft for an account, for "resume the last draft" affordances.
+    pub fn latest_draft(&self, account_id: i64) -> Result<Option<MessageRow>> {
+        self.with_db(|conn| {
+            use rusqlite::OptionalExtension as _;
+            Ok(conn
+                .query_row(
+                    "SELECT id, subject, from_name, from_addr, date, preview, unread, body_hash
+                     FROM message WHERE account_id = ?1 AND provider = 'local'
+                     ORDER BY date DESC LIMIT 1",
+                    params![account_id],
+                    |row| {
+                        Ok(MessageRow {
+                            id: row.get(0)?,
+                            subject: row.get(1)?,
+                            from_name: row.get(2)?,
+                            from_addr: row.get(3)?,
+                            date: row.get(4)?,
+                            preview: row.get(5)?,
+                            unread: row.get::<_, i64>(6)? != 0,
+                            body_hash: row.get(7)?,
+                        })
+                    },
+                )
+                .optional()?)
+        })
+    }
+
+    /// A single message row by id, for the reading pane header.
+    pub fn message(&self, message_id: i64) -> Result<Option<MessageRow>> {        self.with_db(|conn| {
             use rusqlite::OptionalExtension as _;
             Ok(conn
                 .query_row(
@@ -951,6 +1037,33 @@ mod tests {
             !store.insert_message_if_new(&message).unwrap(),
             "re-run must not duplicate"
         );
+    }
+
+    #[test]
+    fn drafts_are_saved_updated_and_deleted() {
+        let store = store_with_account();
+        let id = store
+            .save_draft(None, 1, "Hello", "first line\nsecond", "[]", None, 10)
+            .unwrap();
+        let drafts = store
+            .mailbox_id(1, "Drafts")
+            .unwrap()
+            .expect("Drafts created");
+        let page = store.page(drafts, 10, 0).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].subject.as_deref(), Some("Hello"));
+        assert_eq!(page[0].unread, false);
+
+        // Autosave updates in place rather than inserting another.
+        let again = store
+            .save_draft(Some(id), 1, "Hello there", "edited", "[]", None, 20)
+            .unwrap();
+        assert_eq!(again, id);
+        assert_eq!(store.page(drafts, 10, 0).unwrap().len(), 1);
+        assert_eq!(store.latest_draft(1).unwrap().unwrap().id, id);
+
+        store.delete_message(id).unwrap();
+        assert!(store.page(drafts, 10, 0).unwrap().is_empty());
     }
 
     #[test]

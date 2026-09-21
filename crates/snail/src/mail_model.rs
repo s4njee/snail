@@ -22,7 +22,6 @@ impl MailModel {
     pub fn new(store: Arc<Store>) -> Self {
         Self { store }
     }
-
     pub fn mailboxes(&self) -> Vec<MailboxRow> {
         self.store.mailboxes().unwrap_or_default()
     }
@@ -69,15 +68,34 @@ impl MailModel {
         self.store.accounts().ok()?.first().map(|account| account.id)
     }
 
+    /// Autosave a draft (E7.6): the raw message goes to the cache, the row to the Drafts mailbox.
+    /// Returns the message id to reuse on the next autosave.
+    pub fn save_draft(
+        &self,
+        draft_id: Option<i64>,
+        subject: &str,
+        body_text: &str,
+        to_json: &str,
+        raw: &[u8],
+    ) -> Option<i64> {
+        let account_id = self.first_account_id()?;
+        let raw_hash = self.store.cache().put(raw).ok();
+        let now = now_epoch();
+        self.store
+            .save_draft(draft_id, account_id, subject, body_text, to_json, raw_hash.as_deref(), now)
+            .ok()
+    }
+
+    /// Discard a draft (a sent message, or an explicit delete).
+    pub fn delete_message(&self, id: i64) -> bool {
+        self.store.delete_message(id).is_ok()
+    }
+
     /// Queue an outbound message (E7.10): the raw bytes go to the cache, and the `pending_op` holds
     /// the hash so nothing large sits in SQLite. Blocked by default (after the undo window).
     pub fn enqueue_send(&self, raw: &[u8]) -> Option<String> {
         let account_id = self.first_account_id()?;
         let hash = self.store.cache().put(raw).ok()?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_secs() as i64)
-            .unwrap_or(0);
         self.store
             .enqueue_op(&snail_core::store::NewOp {
                 account_id,
@@ -86,7 +104,7 @@ impl MailModel {
                 operation: "send".into(),
                 payload_json: Some(format!("{{\"raw_hash\":\"{hash}\"}}")),
                 idempotency_key: format!("send:{hash}"),
-                now,
+                now: now_epoch(),
             })
             .ok()?;
         Some(hash)
@@ -117,4 +135,11 @@ impl MailModel {
         let _ = self.store.cache().put_alias(url, &bytes);
         Some(bytes)
     }
+}
+
+fn now_epoch() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
 }
