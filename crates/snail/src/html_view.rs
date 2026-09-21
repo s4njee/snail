@@ -957,44 +957,53 @@ mod tests {
     fn e0_3_corpus_box_trees_match_the_checked_in_snapshot() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut actual = serde_json::Map::new();
-        let mut corpus = std::fs::read_dir(root.join("spikes/corpus"))
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| path.extension().is_some_and(|ext| ext == "eml"))
-            .collect::<Vec<_>>();
-        corpus.sort();
-        for path in corpus {
-            let raw = std::fs::read(&path).unwrap();
-            let parsed = snail_core::mime::parse_raw(&raw).unwrap();
-            let value = match parsed.body {
-                snail_core::mime::Body::Html(html) => {
-                    let document = prepare_document(&html);
-                    let nodes = parse_to_dom(&document, &Images::default(), true);
-                    let value = snapshot(&nodes, document.node_count);
-                    assert_ne!(
-                        value["fragments"],
-                        0,
-                        "{} rendered empty; stylesheet:\n{}",
-                        path.display(),
-                        document.stylesheet
-                    );
-                    value
-                }
-                snail_core::mime::Body::Text(text) => {
-                    let nodes = vec![Node::Text(text)];
-                    snapshot(&nodes, 1)
-                }
-                snail_core::mime::Body::None => panic!("{} has no body", path.display()),
-            };
-            actual.insert(
-                path.file_name().unwrap().to_string_lossy().into_owned(),
-                value,
-            );
+
+        // The corpus is the owner's real mail and is deliberately **not** in the repo, so it is
+        // present on the owner's machine and absent in CI. When it is absent we still verify every
+        // fixture that ships — the checked-in regressions below — against the same snapshot.
+        let corpus = root.join("spikes/corpus");
+        let corpus_present = corpus.is_dir();
+        if corpus_present {
+            let mut paths = std::fs::read_dir(&corpus)
+                .expect("corpus directory")
+                .map(|entry| entry.expect("corpus entry").path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "eml"))
+                .collect::<Vec<_>>();
+            paths.sort();
+            for path in paths {
+                let raw = std::fs::read(&path).unwrap();
+                let parsed = snail_core::mime::parse_raw(&raw).unwrap();
+                let value = match parsed.body {
+                    snail_core::mime::Body::Html(html) => {
+                        let document = prepare_document(&html);
+                        let nodes = parse_to_dom(&document, &Images::default(), true);
+                        let value = snapshot(&nodes, document.node_count);
+                        assert_ne!(
+                            value["fragments"],
+                            0,
+                            "{} rendered empty; stylesheet:\n{}",
+                            path.display(),
+                            document.stylesheet
+                        );
+                        value
+                    }
+                    snail_core::mime::Body::Text(text) => {
+                        let nodes = vec![Node::Text(text)];
+                        snapshot(&nodes, 1)
+                    }
+                    snail_core::mime::Body::None => panic!("{} has no body", path.display()),
+                };
+                actual.insert(
+                    path.file_name().unwrap().to_string_lossy().into_owned(),
+                    value,
+                );
+            }
         }
+
         let regressions = root.join("crates/snail/tests/fixtures/e6-regressions");
         let mut paths = std::fs::read_dir(regressions)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
+            .expect("e6-regressions directory (checked in)")
+            .map(|entry| entry.expect("regression entry").path())
             .collect::<Vec<_>>();
         paths.sort();
         for path in paths {
@@ -1005,13 +1014,38 @@ mod tests {
                 snapshot(&nodes, document.node_count),
             );
         }
+
         let expected: Value =
             serde_json::from_str(include_str!("../tests/fixtures/e6-corpus-snapshot.json"))
                 .unwrap();
+        let expected = expected.as_object().expect("snapshot is an object");
+
+        if !corpus_present {
+            // Compare the subset both sides have. The corpus entries cannot be reproduced here,
+            // but every shipped fixture must still match its recorded box tree.
+            assert!(!actual.is_empty(), "no shipped fixtures to verify");
+            for (name, expected_value) in expected {
+                if let Some(actual_value) = actual.get(name) {
+                    assert_eq!(
+                        actual_value, expected_value,
+                        "snapshot mismatch for {name}: update e6-corpus-snapshot.json only after \
+                         reviewing the box-tree diff"
+                    );
+                }
+            }
+            for name in actual.keys() {
+                assert!(
+                    expected.contains_key(name),
+                    "{name} is not in e6-corpus-snapshot.json"
+                );
+            }
+            return;
+        }
+
         let actual = Value::Object(actual);
         assert_eq!(
             actual,
-            expected,
+            Value::Object(expected.clone()),
             "update e6-corpus-snapshot.json only after reviewing this box-tree diff:\n{}",
             serde_json::to_string_pretty(&actual).unwrap()
         );
