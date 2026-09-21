@@ -33,6 +33,11 @@ image = { version = "0.25", default-features = false, features = [
     "webp",
     "bmp",
 ] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "rustls-tls",
+    "gzip",
+] }
 
 [features]
 default = ["profiler"]

@@ -30,7 +30,20 @@ struct Reading {
 
 enum BodyKind {
     Plain(String),
-    Html(crate::html_view::HtmlView, crate::html_view::Images),
+    Html {
+        html: String,
+        view: crate::html_view::HtmlView,
+        images: crate::html_view::Images,
+    },
+}
+
+/// A remote image fetched on the background executor, waiting to be turned into a gpui image.
+struct RemoteImage {
+    generation: u64,
+    url: String,
+    width: f32,
+    height: f32,
+    bgra: Vec<u8>,
 }
 
 pub struct Shell {
@@ -43,6 +56,10 @@ pub struct Shell {
     rows: Arc<Vec<MessageRow>>,
     selection: Selection,
     reading: Option<Reading>,
+    /// Remote images are blocked by default (E6.2); F4 or `SNAIL_REMOTE_IMAGES=1` unblocks.
+    remote_enabled: bool,
+    pending_remote: Vec<RemoteImage>,
+    generation: u64,
 }
 
 impl Shell {
@@ -65,13 +82,16 @@ impl Shell {
             rows: Arc::new(Vec::new()),
             selection: Selection::new(),
             reading: None,
+            remote_enabled: std::env::var_os("SNAIL_REMOTE_IMAGES").is_some(),
+            pending_remote: Vec::new(),
+            generation: 0,
         };
-        shell.reload(window);
+        shell.reload(window, cx);
         shell
     }
 
     /// Read mailboxes and the selected mailbox's page. Local and fast; E5.12 moves it off-thread.
-    fn reload(&mut self, window: &mut Window) {
+    fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.mailboxes = self.mail.mailboxes();
         if self.selected_mailbox >= self.mailboxes.len() {
             self.selected_mailbox = 0;
@@ -95,17 +115,93 @@ impl Shell {
                 self.selection.select_in(&ids, *first);
             }
         }
-        self.load_reading(window);
+        self.load_reading(window, cx);
     }
 
-    fn select_mailbox(&mut self, index: usize, window: &mut Window) {
+    fn select_mailbox(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.selected_mailbox = index;
         self.selection = Selection::new();
-        self.reload(window);
+        self.reload(window, cx);
     }
 
-    fn load_reading(&mut self, window: &mut Window) {
+    fn load_reading(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.generation += 1;
+        self.pending_remote.clear();
         self.reading = self.selection.cursor().and_then(|id| self.read_message(id, window));
+
+        // If a message has remote images and the user has unblocked them, fetch on the background
+        // executor; the result lands in `pending_remote` and is applied on the next render (E6.8).
+        if !self.remote_enabled {
+            return;
+        }
+        let urls = match &self.reading {
+            Some(Reading {
+                body: BodyKind::Html { html, images, .. },
+                ..
+            }) => crate::html_view::remote_image_urls(html)
+                .into_iter()
+                .filter(|url| !images.contains(url))
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        if !urls.is_empty() {
+            self.fetch_remote(urls, cx);
+        }
+    }
+
+    fn fetch_remote(&mut self, urls: Vec<String>, cx: &mut Context<Self>) {
+        let mail = self.mail.clone();
+        let generation = self.generation;
+        let task = cx.background_executor().spawn(async move {
+            let mut out = Vec::new();
+            for url in urls {
+                if let Some(bytes) = mail.fetch_remote_image(&url) {
+                    if let Some((width, height, bgra)) = crate::html_view::decode_to_bgra(&bytes) {
+                        out.push(RemoteImage {
+                            generation,
+                            url,
+                            width,
+                            height,
+                            bgra,
+                        });
+                    }
+                }
+            }
+            out
+        });
+        cx.spawn(async move |this, cx| {
+            let fetched = task.await;
+            this.update(cx, |this, cx| {
+                this.pending_remote.extend(fetched);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Turn fetched remote images into gpui images and re-lay out the reading pane. Runs in render,
+    /// where the window is available for text metrics.
+    fn apply_pending_images(&mut self, window: &mut Window) {
+        if self.pending_remote.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_remote);
+        let generation = self.generation;
+        if let Some(Reading {
+            body: BodyKind::Html { html, view, images },
+            ..
+        }) = &mut self.reading
+        {
+            for remote in pending {
+                if remote.generation != generation {
+                    continue;
+                }
+                let render = crate::html_view::render_image(remote.width, remote.height, remote.bgra);
+                images.insert_remote(&remote.url, remote.width, remote.height, render);
+            }
+            *view = crate::html_view::layout_html(html, 640.0, window, images);
+        }
     }
 
     fn read_message(&self, id: i64, window: &mut Window) -> Option<Reading> {
@@ -119,7 +215,7 @@ impl Shell {
                 };
                 // 640px is roughly the reading pane's content width at the default window size.
                 let view = crate::html_view::layout_html(&html, 640.0, window, &images);
-                BodyKind::Html(view, images)
+                BodyKind::Html { html, view, images }
             }
             _ => BodyKind::Plain(
                 parsed
@@ -276,7 +372,7 @@ impl Shell {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event, window, cx| {
-                    this.select_mailbox(index, window);
+                    this.select_mailbox(index, window, cx);
                     cx.notify();
                 }),
             )
@@ -402,7 +498,7 @@ impl Shell {
             .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                 weak.update(cx, |this, cx| {
                     this.selection.select_in(&ids, id);
-                    this.load_reading(window);
+                    this.load_reading(window, cx);
                     cx.notify();
                 })
                 .ok();
@@ -521,7 +617,7 @@ impl Shell {
                     .px_6()
                     .py_5()
                     .child(match &reading.body {
-                        BodyKind::Html(view, images) => {
+                        BodyKind::Html { view, images, .. } => {
                             crate::html_view::paint(view, images).into_any_element()
                         }
                         BodyKind::Plain(text) => {
@@ -575,6 +671,8 @@ fn initials(name: &str) -> String {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Apply any remote images that arrived since the last frame, then re-lay out (E6.8).
+        self.apply_pending_images(window);
         let palette = style::palette(cx);
 
         let overlay = if self.overlay.visible {
@@ -626,11 +724,16 @@ impl Render for Shell {
                     }
                     "up" => {
                         this.selection.move_by(-1, &ids);
-                        this.load_reading(window);
+                        this.load_reading(window, cx);
                     }
                     "down" => {
                         this.selection.move_by(1, &ids);
-                        this.load_reading(window);
+                        this.load_reading(window, cx);
+                    }
+                    // F4 toggles remote images (E6.2's unblock), for now a global switch.
+                    "f4" => {
+                        this.remote_enabled = !this.remote_enabled;
+                        this.load_reading(window, cx);
                     }
                     _ => return,
                 }

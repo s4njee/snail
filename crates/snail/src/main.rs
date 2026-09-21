@@ -9,7 +9,7 @@ use gpui_kit::*;
 use snail_core::fixture::FixtureSpec;
 use snail_core::paths::Paths;
 use snail_core::providers::gmail::{FixedToken, GmailClient};
-use snail_core::store::Store;
+use snail_core::store::{NewMessage, ProviderRef, Store};
 use snail_services::auth::GoogleOAuth;
 use std::sync::Arc;
 
@@ -50,7 +50,7 @@ fn main() {
 
     // Benchmark and fixture modes never open a window (E0.9, E2.9, E17.1).
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|arg| arg == "--generate-fixture" || arg == "--bench-store" || arg == "--backfill-gmail") {
+    if args.iter().any(|arg| arg == "--generate-fixture" || arg == "--bench-store" || arg == "--backfill-gmail" || arg == "--import-eml") {
         if let Err(error) = run_store_cli(&paths, &args) {
             eprintln!("{error:#}");
             std::process::exit(1);
@@ -177,6 +177,48 @@ fn run_store_cli(paths: &Paths, args: &[String]) -> anyhow::Result<()> {
             "backfill: enumerated {}, inserted {}, head {:?}",
             report.enumerated, report.inserted, report.head_history_id
         );
+    }
+
+    if args.iter().any(|arg| arg == "--import-eml") {
+        let path = args
+            .iter()
+            .position(|arg| arg == "--import-eml")
+            .and_then(|index| args.get(index + 1))
+            .ok_or_else(|| anyhow::anyhow!("--import-eml needs a path"))?;
+        let bytes = std::fs::read(path)?;
+        let parsed = snail_core::mime::parse_raw(&bytes)?;
+        let store = Store::open(paths)?;
+        let account_id = match store.account_by_address("local", "import@local")? {
+            Some(account) => account.id,
+            None => store.insert_account("local", "import@local", Some("Imported"), 0)?,
+        };
+        let mailbox = store.ensure_mailbox(account_id, "Inbox", "inbox")?;
+        let thread = store.ensure_thread(account_id, None, parsed.subject.as_deref())?;
+        let raw_hash = store.cache().put(&bytes)?;
+        let inserted = store.insert_message_if_new(&NewMessage {
+            account_id,
+            mailbox_id: Some(mailbox),
+            thread_id: Some(thread),
+            provider: Some(ProviderRef::Gmail {
+                id: format!("import-{raw_hash}"),
+                thread_id: None,
+                history_id: None,
+            }),
+            message_id: parsed.message_id,
+            in_reply_to: parsed.in_reply_to,
+            references: parsed.references,
+            subject: parsed.subject,
+            from_name: parsed.from_name,
+            from_addr: parsed.from_addr,
+            to_json: Some(serde_json::to_string(&parsed.to)?),
+            date: parsed.date,
+            preview: parsed.preview,
+            unread: true,
+            raw_hash: Some(raw_hash),
+            ..Default::default()
+        })?;
+        store.recount_mailbox(mailbox)?;
+        println!("imported {path}: inserted={inserted}");
     }
 
     if args.iter().any(|arg| arg == "--bench-store") {

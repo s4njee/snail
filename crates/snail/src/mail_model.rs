@@ -13,6 +13,7 @@ use snail_core::store::Store;
 // The shell sees these through the model, so it never names the store.
 pub use snail_core::store::{MailboxRow, MessageRow};
 
+#[derive(Clone)]
 pub struct MailModel {
     store: Arc<Store>,
 }
@@ -43,5 +44,32 @@ impl MailModel {
     /// The cached raw MIME bytes, for resolving inline `cid:` images (E6.8).
     pub fn raw(&self, id: i64) -> Option<Vec<u8>> {
         self.store.raw_bytes(id).ok().flatten()
+    }
+
+    /// Fetch a remote image, served from the content-addressed cache when it has been seen (E6.8).
+    /// Runs on whatever thread calls it — the shell calls it from the background executor.
+    pub fn fetch_remote_image(&self, url: &str) -> Option<Vec<u8>> {
+        let key = snail_core::cache::hash_bytes(url.as_bytes());
+        if let Ok(Some(cached)) = self.store.cache().get(&key) {
+            return Some(cached);
+        }
+        let response = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .ok()?
+            .get(url)
+            .header(reqwest::header::ACCEPT_ENCODING, "gzip")
+            .header(reqwest::header::USER_AGENT, "snail/0.1 (gzip)")
+            .send()
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let bytes = response.bytes().ok()?.to_vec();
+        if bytes.len() > 10 * 1024 * 1024 {
+            return None;
+        }
+        let _ = self.store.cache().put(&bytes);
+        Some(bytes)
     }
 }

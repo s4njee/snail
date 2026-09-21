@@ -56,9 +56,49 @@ impl Images {
     fn size(&self, src: &str) -> Option<(f32, f32)> {
         self.resolve(src).map(|placed| (placed.width, placed.height))
     }
+
+    /// Add a remote image once it has been fetched and decoded (E6.8).
+    pub fn insert_remote(&mut self, url: &str, width: f32, height: f32, render: Arc<RenderImage>) {
+        self.map.insert(url.to_string(), Placed {
+            width,
+            height,
+            render,
+        });
+    }
+
+    pub fn contains(&self, url: &str) -> bool {
+        self.map.contains_key(url)
+    }
 }
 
-fn decode(bytes: &[u8]) -> Option<Placed> {
+/// Every `http(s)` image URL in a document (E6.8). Remote images are only fetched when the user has
+/// unblocked them (E6.2); by default they stay placeholders.
+pub fn remote_image_urls(html: &str) -> Vec<String> {
+    let lower = html.to_ascii_lowercase();
+    let mut out = Vec::new();
+    let mut cursor = 0;
+    while let Some(found) = lower[cursor..].find("src=") {
+        let start = cursor + found + 4;
+        let rest = html[start..].trim_start();
+        let (quote, body) = match rest.chars().next() {
+            Some('"') => ('"', &rest[1..]),
+            Some('\'') => ('\'', &rest[1..]),
+            _ => (' ', rest),
+        };
+        let end = body.find(quote).unwrap_or(body.len());
+        let value = &body[..end];
+        if value.starts_with("http://") || value.starts_with("https://") {
+            out.push(value.to_string());
+        }
+        cursor = start + end + 1;
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Decode an image to BGRA bytes plus its size, ready for gpui's `RenderImage`.
+pub fn decode_to_bgra(bytes: &[u8]) -> Option<(f32, f32, Vec<u8>)> {
     let decoded = image::load_from_memory(bytes).ok()?;
     let mut rgba = decoded.to_rgba8();
     let (width, height) = rgba.dimensions();
@@ -66,12 +106,23 @@ fn decode(bytes: &[u8]) -> Option<Placed> {
     for pixel in rgba.pixels_mut() {
         pixel.0.swap(0, 2);
     }
-    let frame = image::Frame::new(rgba);
-    let render = Arc::new(RenderImage::new(vec![frame]));
+    Some((width as f32, height as f32, rgba.into_raw()))
+}
+
+/// Build a gpui image from BGRA bytes.
+pub fn render_image(width: f32, height: f32, bgra: Vec<u8>) -> Arc<RenderImage> {
+    let buffer =
+        image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(width as u32, height as u32, bgra)
+            .expect("BGRA buffer matches its dimensions");
+    Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]))
+}
+
+fn decode(bytes: &[u8]) -> Option<Placed> {
+    let (width, height, bgra) = decode_to_bgra(bytes)?;
     Some(Placed {
-        width: width as f32,
-        height: height as f32,
-        render,
+        width,
+        height,
+        render: render_image(width, height, bgra),
     })
 }
 
