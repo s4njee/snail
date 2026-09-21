@@ -16,8 +16,7 @@ use snail_ui::text::TextRole;
 use crate::mail_model::MailModel;
 use crate::style;
 
-/// Default undo-send window (E7.10); a settings control lands in E14.4.
-const UNDO_SECONDS: u64 = 10;
+/// Default autosave debounce.
 const AUTOSAVE: Duration = Duration::from_millis(1000);
 
 /// Open a compose window with the given draft (E7.1).
@@ -150,7 +149,8 @@ impl Compose {
             return;
         }
         self.autosave(cx);
-        self.send_at = Some(Instant::now() + Duration::from_secs(UNDO_SECONDS));
+        let seconds = crate::settings::undo_send_seconds(cx);
+        self.send_at = Some(Instant::now() + Duration::from_secs(seconds));
         cx.notify();
     }
 

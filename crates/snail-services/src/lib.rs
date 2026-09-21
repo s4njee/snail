@@ -4,4 +4,5 @@
 //! attachment/temp-file handling (plan.md §2).
 
 pub mod auth;
+pub mod outbox;
 pub mod secrets;

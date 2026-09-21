@@ -84,6 +84,49 @@ pub fn toggle_body_preference(cx: &mut App) -> snail_core::mime::BodyPreference 
     }
 }
 
+/// Per-account mail settings (E7.9/E7.10); a UI lands in E14.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct MailSection {
+    #[serde(default)]
+    signature: String,
+    #[serde(default = "default_undo_seconds")]
+    undo_send_seconds: u64,
+}
+
+impl Default for MailSection {
+    fn default() -> Self {
+        Self {
+            signature: String::new(),
+            undo_send_seconds: default_undo_seconds(),
+        }
+    }
+}
+
+fn default_undo_seconds() -> u64 {
+    10
+}
+
+pub fn signature(cx: &App) -> Option<String> {
+    let value = cx
+        .global::<ThemeSettings>()
+        .0
+        .load::<MailSection>("mail")
+        .signature;
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+pub fn undo_send_seconds(cx: &App) -> u64 {
+    cx.global::<ThemeSettings>()
+        .0
+        .load::<MailSection>("mail")
+        .undo_send_seconds
+        .clamp(0, 300)
+}
+
 fn sender_key(sender: &str) -> String {
     sender.trim().to_ascii_lowercase()
 }

@@ -140,6 +140,22 @@ pub fn quote(original: &ParsedMessage) -> String {
     out
 }
 
+/// Insert a signature above the quoted text (E7.9), with the standard `-- ` separator.
+pub fn with_signature(body: &str, signature: &str) -> String {
+    let signature = signature.trim_end();
+    if signature.is_empty() {
+        return body.to_string();
+    }
+    match body.find("\n\nOn ") {
+        Some(index) => format!(
+            "{}\n\n-- \n{signature}\n{}",
+            body[..index].trim_end(),
+            &body[index..]
+        ),
+        None => format!("{}\n\n-- \n{signature}\n", body.trim_end()),
+    }
+}
+
 /// Ensure a subject carries `Re:`/`Fwd:` exactly once (case-insensitive).
 pub fn with_prefix(subject: &str, prefix: &str) -> String {
     let trimmed = subject.trim();
@@ -227,6 +243,19 @@ mod tests {
         assert!(!addresses.contains(&"me@example.com"), "not to self");
         assert!(!addresses.contains(&"maya@example.com"), "not to the sender again");
         assert!(addresses.contains(&"other@example.com"));
+    }
+
+    #[test]
+    fn signature_is_inserted_above_the_quote() {
+        let body = "thanks\n\nOn 1700000000, Maya wrote:\n> hi";
+        let signed = with_signature(body, "— Sanjee");
+        assert!(signed.contains("-- \n— Sanjee"));
+        assert!(
+            signed.find("— Sanjee").unwrap() < signed.find("> hi").unwrap(),
+            "signature must precede the quote"
+        );
+        // An empty signature is a no-op.
+        assert_eq!(with_signature(body, "  "), body);
     }
 
     #[test]

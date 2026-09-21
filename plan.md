@@ -1030,7 +1030,7 @@ a live countdown and Undo before the op is queued and the draft removed (7.10).)
 - [ ] 7.8 — Body format: plain text by default with a minimal HTML mode behind the handoff's format
       bar (bold, italic, list, link). **The renderer of our own HTML is E6's; keep the generated
       markup trivially simple** so replies are readable in every other client.
-- [ ] 7.9 — Signature from settings, serif per the handoff, inserted above the quote on reply.
+- [x] 7.9 — Signature from settings, serif per the handoff, inserted above the quote on reply.
 - [x] 7.10 — Undo send: configurable window (default 10s), the message parked in `pending_op` with
       a visible countdown and Undo, dispatched only when it expires. Nothing leaves the machine
       during the window.

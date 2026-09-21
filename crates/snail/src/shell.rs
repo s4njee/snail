@@ -718,7 +718,10 @@ impl Shell {
             return;
         };
         let self_addr = self.mail.first_account_address();
-        let draft = snail_core::compose::reply(&parsed, self_addr.as_deref(), all);
+        let mut draft = snail_core::compose::reply(&parsed, self_addr.as_deref(), all);
+        if let Some(signature) = crate::settings::signature(cx) {
+            draft.body_text = snail_core::compose::with_signature(&draft.body_text, &signature);
+        }
         crate::compose::open(self.mail.clone(), draft, cx);
     }
 
