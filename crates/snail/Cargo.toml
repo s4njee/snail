@@ -1,0 +1,31 @@
+[package]
+name = "snail"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Snail — a lightweight mail and calendar client, built in Rust on GPUI."
+
+[[bin]]
+name = "snail"
+path = "src/main.rs"
+
+[dependencies]
+gpui-kit = { workspace = true }
+gpui = { workspace = true }
+gpui-pre-platform = { workspace = true }
+snail-core = { path = "../snail-core" }
+snail-ui = { path = "../snail-ui" }
+snail-services = { path = "../snail-services" }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
+
+[features]
+default = ["profiler"]
+# GPUI's per-frame draw and present timings, read by the dev overlay (plan.md E0.8). Only costs
+# anything while tracing is switched on.
+profiler = ["gpui-kit/profiler"]

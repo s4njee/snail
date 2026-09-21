@@ -1,0 +1,14 @@
+[package]
+name = "snail-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Snail's UI-agnostic core: store, MIME, threading, recurrence, PGP, providers."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+dirs = "6"
+env_logger = { workspace = true }

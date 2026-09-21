@@ -1,0 +1,28 @@
+# E0.4 spike: both accounts authenticate and pull one page (plan.md §3, E0.4).
+#
+# Its own workspace so the app's lockfile and pin are untouched. This also hosts the E0.3 corpus
+# dumper (`corpus`), because the cleanest way to get 20 real `format=raw` messages is over the same
+# Gmail token this spike obtains.
+[workspace]
+
+[package]
+name = "snail-e0-4"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "gzip"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
+async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+webpki-roots = "1"
+futures = "0.3"

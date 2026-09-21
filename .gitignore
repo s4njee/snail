@@ -1,0 +1,13 @@
+/target
+**/target
+/spikes/*/target
+/spikes/*/Cargo.lock
+.DS_Store
+*.log
+
+# Credentials and secrets — never commit. Holds the Google OAuth client and the iCloud
+# app-specific password used by the E0.4 auth spike.
+email.rtf
+/.secrets/
+# Real mail pulled for the E0.3 corpus. Private; never commit.
+/spikes/corpus/

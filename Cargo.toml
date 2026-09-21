@@ -1,0 +1,40 @@
+[workspace]
+members = [
+    "crates/snail-core",
+    "crates/snail-ui",
+    "crates/snail-services",
+    "crates/snail",
+]
+# Spikes are throwaway binaries in their own workspaces (plan.md E0). Exclude them explicitly so a
+# spike's lockfile and target/ are never dragged into the app's resolution.
+exclude = ["spikes"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.97.1"
+
+# Exact (`=`) pins on the whole GPUI family are mandatory, not tidiness: every crate in the tree
+# must resolve to one GPUI source or the types do not match (plan.md §1.1). gpui-kit depends on
+# gpui-pre by semver, so these `=` pins are what actually stop cargo floating.
+#
+# gpui-kit re-exports GPUI, so app code never names it directly. The `gpui` name is kept because
+# GPUI's `Action` derive generates `gpui::` paths.
+[workspace.dependencies]
+gpui-kit = { version = "=0.6.4", default-features = true }
+gpui = { package = "gpui-pre", version = "=0.3.5" }
+gpui-pre-platform = "=0.3.5"
+
+anyhow = "1"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+env_logger = "0.11"
+futures = "0.3"
+
+# Debug builds optimize dependencies (GPUI above all), so scrolling and animation in a dev build
+# are close to release while the workspace's own crates still rebuild quickly (plan.md §1.2).
+[profile.dev.package."*"]
+opt-level = 2

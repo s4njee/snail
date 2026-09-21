@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics><meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,400;6..72,500&display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#e8e4dc;font-family:'Instrument Sans',system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+a{color:#2c5fb8}a:hover{color:#1d4489}
+</style></helmet>
+
+<section style="padding:44px 48px 40px">
+<div style="display:flex;align-items:baseline;gap:10px;margin:0 0 6px">
+<a href="#t1" style="font:600 10px ui-monospace,Menlo,monospace;padding:3px 7px;background:#1b1917;color:#fff;border-radius:4px;text-decoration:none">1</a>
+<span style="font:600 13px/1.2 'Instrument Sans',sans-serif;color:#1b1917">Lightweight mail client — four screens</span>
+</div>
+<p style="margin:0 0 30px;max-width:640px;font:400 12.5px/1.6 'Instrument Sans',sans-serif;color:#6f6963">Warm paper ground, one amber accent, no smart folders or VIPs. Two-line list rows with preview. Serif body text in the reading pane so messages read like letters, not UI.</p>
+
+<div style="display:flex;flex-wrap:wrap;gap:36px;align-items:flex-start">
+
+<!-- 1a INBOX -->
+<div id="1a" style="display:flex;flex-direction:column;gap:9px;scroll-margin-top:16px">
+<div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 'Instrument Sans',sans-serif;color:rgba(0,0,0,.55)"><a href="#1a" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1b1917;border-radius:5px;text-decoration:none">1a</a>Inbox — three panes</div>
+<div style="width:1180px;height:720px;background:#faf8f5;border-radius:12px;box-shadow:0 24px 60px rgba(40,32,20,.18),0 2px 6px rgba(40,32,20,.1);overflow:hidden;display:flex;flex-direction:column">
+  <div style="height:46px;flex:none;display:flex;align-items:center;gap:14px;padding:0 14px;background:#f2efe9;border-bottom:1px solid rgba(0,0,0,.07)">
+    <div style="display:flex;gap:8px"><div style="width:12px;height:12px;border-radius:50%;background:#ff5f57"></div><div style="width:12px;height:12px;border-radius:50%;background:#febc2e"></div><div style="width:12px;height:12px;border-radius:50%;background:#28c840"></div></div>
+    <div style="width:1px;height:20px;background:rgba(0,0,0,.09);margin-left:6px"></div>
+    <div style="display:flex;align-items:center;gap:6px;color:#4a4540">
+      <div style="display:flex;align-items:center;gap:7px;padding:5px 10px;border-radius:7px;background:#faf8f5;border:1px solid rgba(0,0,0,.09);font:500 12px 'Instrument Sans',sans-serif;color:#1b1917"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#2c5fb8" stroke-width="1.4"><path d="M2 4h12v9H2z"/><path d="M2 4.5l6 4.5 6-4.5"/></svg>New message</div>
+      <div style="width:1px;height:20px;background:rgba(0,0,0,.09);margin:0 4px"></div>
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#5c564f" stroke-width="1.4"><path d="M2 5h12v8H2z"/><path d="M2 5l1.2-2h9.6L14 5"/><path d="M6 8.5h4"/></svg>
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#5c564f" stroke-width="1.4" style="margin-left:12px"><path d="M3 4.5h10"/><path d="M4.5 4.5l.8 8.5h5.4l.8-8.5"/><path d="M6.4 4.5V3h3.2v1.5"/></svg>
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#5c564f" stroke-width="1.4" style="margin-left:12px"><path d="M7 4L3 7.5 7 11V9c3.2 0 5 1 6 3 0-4.5-2.4-6.6-6-6.8z"/></svg>
+    </div>
+    <div style="margin-left:auto;display:flex;align-items:center;gap:7px;width:230px;padding:5px 10px;border-radius:7px;background:rgba(0,0,0,.045);font:400 12px 'Instrument Sans',sans-serif;color:#8a837b">
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#8a837b" stroke-width="1.5"><circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2L14 14"/></svg>Search</div>
+  </div>
+  <div style="flex:1;display:flex;min-height:0">
+    <!-- sidebar -->
+    <div style="width:206px;flex:none;background:#f2efe9;border-right:1px solid rgba(0,0,0,.07);padding:16px 10px;display:flex;flex-direction:column;gap:2px">
+      <div style="font:600 10px 'Instrument Sans',sans-serif;letter-spacing:.09em;text-transform:uppercase;color:#a09890;padding:0 8px 8px">Mailboxes</div>
+      <div style="display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:7px;background:#d7e2f4;font:600 13px 'Instrument Sans',sans-serif;color:#1b1917"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#2c5fb8" stroke-width="1.5"><path d="M2 8.5V13h12V8.5l-2.2-5H4.2z"/><path d="M2 8.5h3l1 2h4l1-2h3"/></svg>Inbox<span style="margin-left:auto;font:600 11px 'Instrument Sans',sans-serif;color:#2c5fb8">12</span></div>
+      <div style="display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:7px;font:500 13px 'Instrument Sans',sans-serif;color:#3f3a35"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#6f6963" stroke-width="1.5"><path d="M14 2L7 9"/><path d="M14 2l-4.5 12L7 9 2 6.5z"/></svg>Sent</div>
+      <div style="display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:7px;font:500 13px 'Instrument Sans',sans-serif;color:#3f3a35"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#6f6963" stroke-width="1.5"><path d="M3 2.5h7l3 3V13.5H3z"/><path d="M9.5 2.5V6H13"/></svg>Drafts<span style="margin-left:auto;font:500 11px 'Instrument Sans',sans-serif;color:#a09890">2</span></div>
+      <div style="display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:7px;font:500 13px 'Instrument Sans',sans-serif;color:#3f3a35"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#6f6963" stroke-width="1.5"><path d="M2 5h12v8H2z"/><path d="M2 5l1.2-2h9.6L14 5"/><path d="M6 8.5h4"/></svg>Archive</div>
+      <div style="display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:7px;font:500 13px 'Instrument Sans',sans-serif;color:#3f3a35"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#6f6963" stroke-width="1.5"><path d="M3 4.5h10"/><path d="M4.5 4.5l.8 8.5h5.4l.8-8.5"/><path d="M6.4 4.5V3h3.2v1.5"/></svg>Trash</div>
+      <div style="height:20px"></div>
+      <div style="font:600 10px 'Instrument Sans',sans-serif;letter-spacing:.09em;text-transform:uppercase;color:#a09890;padding:0 8px 8px">Accounts</div>
+      <div style="display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:7px;font:500 13px 'Instrument Sans',sans-serif;color:#3f3a35"><span style="width:7px;height:7px;border-radius:50%;background:#2c5fb8"></span>Personal</div>
+      <div style="display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:7px;font:500 13px 'Instrument Sans',sans-serif;color:#3f3a35"><span style="width:7px;height:7px;border-radius:50%;background:#7a8f6d"></span>Studio</div>
+    </div>
+    <!-- list -->
+    <div style="width:336px;flex:none;border-right:1px solid rgba(0,0,0,.07);display:flex;flex-direction:column;background:#faf8f5">
+      <div style="padding:13px 16px 11px;display:flex;align-items:baseline;justify-content:space-between;border-bottom:1px solid rgba(0,0,0,.07)"><span style="font:600 14px 'Instrument Sans',sans-serif;color:#1b1917">Inbox</span><span style="font:400 11px 'Instrument Sans',sans-serif;color:#a09890">12 unread</span></div>
+      <div style="flex:1;overflow:hidden">
+        <div style="display:flex;gap:10px;padding:12px 16px;background:#e2eaf7;border-bottom:1px solid rgba(0,0,0,.055);box-shadow:inset 3px 0 0 #2c5fb8">
+          <div style="width:7px;height:7px;border-radius:50%;background:#2c5fb8;margin-top:5px;flex:none"></div>
+          <div style="min-width:0;flex:1">
+            <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline"><span style="font:600 13px 'Instrument Sans',sans-serif;color:#1b1917">Maya Okonkwo</span><span style="font:400 11px 'Instrument Sans',sans-serif;color:#8a837b">9:14 AM</span></div>
+            <div style="font:500 12.5px 'Instrument Sans',sans-serif;color:#1b1917;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Re: Fieldwork notes, week three</div>
+            <div style="font:400 12px/1.45 'Instrument Sans',sans-serif;color:#6f6963;margin-top:3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">I went back through the transcripts last night and pulled out the parts where people described their morning routine — there's a pattern…</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;padding:12px 16px;border-bottom:1px solid rgba(0,0,0,.055)">
+          <div style="width:7px;height:7px;border-radius:50%;background:#2c5fb8;margin-top:5px;flex:none"></div>
+          <div style="min-width:0;flex:1">
+            <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline"><span style="font:600 13px 'Instrument Sans',sans-serif;color:#1b1917">Ledger &amp; Co.</span><span style="font:400 11px 'Instrument Sans',sans-serif;color:#8a837b">8:02 AM</span></div>
+            <div style="font:500 12.5px 'Instrument Sans',sans-serif;color:#1b1917;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Invoice 2214 is due Friday</div>
+            <div style="font:400 12px/1.45 'Instrument Sans',sans-serif;color:#6f6963;margin-top:3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">A copy is attached. Reply to this message if anything on it looks wrong and we'll reissue.</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;padding:12px 16px;border-bottom:1px solid rgba(0,0,0,.055)">
+          <div style="width:7px;height:7px;flex:none"></div>
+          <div style="min-width:0;flex:1">
+            <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline"><span style="font:500 13px 'Instrument Sans',sans-serif;color:#3f3a35">Tomás Beck</span><span style="font:400 11px 'Instrument Sans',sans-serif;color:#8a837b">Yesterday</span></div>
+            <div style="font:400 12.5px 'Instrument Sans',sans-serif;color:#3f3a35;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Keys for the studio</div>
+            <div style="font:400 12px/1.45 'Instrument Sans',sans-serif;color:#8a837b;margin-top:3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">Left the spare set with Ana at the front desk. She's there until six most days.</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;padding:12px 16px;border-bottom:1px solid rgba(0,0,0,.055)">
+          <div style="width:7px;height:7px;border-radius:50%;background:#2c5fb8;margin-top:5px;flex:none"></div>
+          <div style="min-width:0;flex:1">
+            <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline"><span style="font:600 13px 'Instrument Sans',sans-serif;color:#1b1917">Hana Ferreira</span><span style="font:400 11px 'Instrument Sans',sans-serif;color:#8a837b">Yesterday</span></div>
+            <div style="font:500 12.5px 'Instrument Sans',sans-serif;color:#1b1917;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Two dates that work for the walkthrough</div>
+            <div style="font:400 12px/1.45 'Instrument Sans',sans-serif;color:#6f6963;margin-top:3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">The 14th in the morning or the 17th any time after lunch. Either works on my end, so pick whichever is easier.</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;padding:12px 16px;border-bottom:1px solid rgba(0,0,0,.055)">
+          <div style="width:7px;height:7px;flex:none"></div>
+          <div style="min-width:0;flex:1">
+            <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline"><span style="font:500 13px 'Instrument Sans',sans-serif;color:#3f3a35">Rowan Pike</span><span style="font:400 11px 'Instrument Sans',sans-serif;color:#8a837b">Tuesday</span></div>
+            <div style="font:400 12.5px 'Instrument Sans',sans-serif;color:#3f3a35;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Books you asked about</div>
+            <div style="font:400 12px/1.45 'Instrument Sans',sans-serif;color:#8a837b;margin-top:3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">Three of the four are out of print but I found scans. Links below — the last one only exists as a photocopy.</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;padding:12px 16px;border-bottom:1px solid rgba(0,0,0,.055)">
+          <div style="width:7px;height:7px;flex:none"></div>
+          <div style="min-width:0;flex:1">
+            <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline"><span style="font:500 13px 'Instrument Sans',sans-serif;color:#3f3a35">Northline Transit</span><span style="font:400 11px 'Instrument Sans',sans-serif;color:#8a837b">Tuesday</span></div>
+            <div style="font:400 12.5px 'Instrument Sans',sans-serif;color:#3f3a35;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Your monthly pass renews on the 1st</div>
+            <div style="font:400 12px/1.45 'Instrument Sans',sans-serif;color:#8a837b;margin-top:3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">No action needed. The card ending 4417 will be charged $88.00.</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;padding:12px 16px;border-bottom:1px solid rgba(0,0,0,.055)">
+          <div style="width:7px;height:7px;flex:none"></div>
+          <div style="min-width:0;flex:1">
+            <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline"><span style="font:500 13px 'Instrument Sans',sans-serif;color:#3f3a35">Dad</span><span style="font:400 11px 'Instrument Sans',sans-serif;color:#8a837b">Monday</span></div>
+            <div style="font:400 12.5px 'Instrument Sans',sans-serif;color:#3f3a35;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Photos from the cabin</div>
+            <div style="font:400 12px/1.45 'Instrument Sans',sans-serif;color:#8a837b;margin-top:3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">Your mother says the one with the canoe is the best of the lot. I disagree.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- reading -->
+    <div style="flex:1;min-width:0;display:flex;flex-direction:column;background:#faf8f5">
+      <div style="padding:22px 34px 16px;border-bottom:1px solid rgba(0,0,0,.07)">
+        <div style="font:600 19px/1.3 'Instrument Sans',sans-serif;color:#1b1917;letter-spacing:-.01em">Re: Fieldwork notes, week three</div>
+        <div style="display:flex;align-items:center;gap:11px;margin-top:14px">
+          <div style="width:32px;height:32px;border-radius:50%;background:#d7e2f4;display:flex;align-items:center;justify-content:center;font:600 12px 'Instrument Sans',sans-serif;color:#2c5fb8">MO</div>
+          <div style="min-width:0">
+            <div style="font:600 13px 'Instrument Sans',sans-serif;color:#1b1917">Maya Okonkwo</div>
+            <div style="font:400 11.5px 'Instrument Sans',sans-serif;color:#8a837b">to me · 9:14 AM</div>
+          </div>
+          <div style="margin-left:auto;display:flex;gap:8px">
+            <div style="padding:6px 12px;border-radius:7px;border:1px solid rgba(0,0,0,.12);font:500 12px 'Instrument Sans',sans-serif;color:#3f3a35">Reply</div>
+            <div style="padding:6px 12px;border-radius:7px;border:1px solid rgba(0,0,0,.12);font:500 12px 'Instrument Sans',sans-serif;color:#3f3a35">Forward</div>
+          </div>
+        </div>
+      </div>
+      <div style="flex:1;padding:26px 34px;font:400 15px/1.7 Newsreader,Georgia,serif;color:#241f1b">
+        <p style="margin:0 0 16px">I went back through the transcripts last night and pulled out the parts where people described their morning routine. There's a pattern I didn't see when we were in the field: almost everyone checks mail before they've decided what they're doing that day.</p>
+        <p style="margin:0 0 16px">Three of the six said they reread the same messages more than once because they couldn't remember whether they'd answered. That feels like the thing worth designing against.</p>
+        <p style="margin:0 0 16px">I've attached the coded transcripts and a short summary. The summary is rough — treat the numbers as directional until I finish coding the last two.</p>
+        <p style="margin:0">Maya</p>
+        <div style="display:flex;gap:10px;margin-top:26px">
+          <div style="display:flex;align-items:center;gap:9px;padding:9px 13px;border-radius:8px;background:#f2efe9;border:1px solid rgba(0,0,0,.07)">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#2c5fb8" stroke-width="1.4"><path d="M4 2.5h5l3 3v8H4z"/><path d="M9 2.5V6h3"/></svg>
+            <div><div style="font:500 12px 'Instrument Sans',sans-serif;color:#1b1917">transcripts-w3.pdf</div><div style="font:400 10.5px 'Instrument Sans',sans-serif;color:#8a837b">1.4 MB</div></div>
+          </div>
+          <div style="display:flex;align-items:center;gap:9px;padding:9px 13px;border-radius:8px;background:#f2efe9;border:1px solid rgba(0,0,0,.07)">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#2c5fb8" stroke-width="1.4"><path d="M4 2.5h5l3 3v8H4z"/><path d="M9 2.5V6h3"/></svg>
+            <div><div style="font:500 12px 'Instrument Sans',sans-serif;color:#1b1917">summary.md</div><div style="font:400 10.5px 'Instrument Sans',sans-serif;color:#8a837b">6 KB</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- 1b READING -->
+<div id="1b" style="display:flex;flex-direction:column;gap:9px;scroll-margin-top:16px">
+<div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 'Instrument Sans',sans-serif;color:rgba(0,0,0,.55)"><a href="#1b" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1b1917;border-radius:5px;text-decoration:none">1b</a>Reading a thread — list collapsed, one column of message</div>
+<div style="width:900px;height:720px;background:#faf8f5;border-radius:12px;box-shadow:0 24px 60px rgba(40,32,20,.18),0 2px 6px rgba(40,32,20,.1);overflow:hidden;display:flex;flex-direction:column">
+  <div style="height:46px;flex:none;display:flex;align-items:center;gap:14px;padding:0 14px;background:#f2efe9;border-bottom:1px solid rgba(0,0,0,.07)">
+    <div style="display:flex;gap:8px"><div style="width:12px;height:12px;border-radius:50%;background:#ff5f57"></div><div style="width:12px;height:12px;border-radius:50%;background:#febc2e"></div><div style="width:12px;height:12px;border-radius:50%;background:#28c840"></div></div>
+    <div style="width:1px;height:20px;background:rgba(0,0,0,.09);margin-left:6px"></div>
+    <div style="display:flex;align-items:center;gap:16px">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#5c564f" stroke-width="1.5"><path d="M9.5 3L5 8l4.5 5"/></svg>
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#5c564f" stroke-width="1.4"><path d="M2 5h12v8H2z"/><path d="M2 5l1.2-2h9.6L14 5"/><path d="M6 8.5h4"/></svg>
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#5c564f" stroke-width="1.4"><path d="M3 4.5h10"/><path d="M4.5 4.5l.8 8.5h5.4l.8-8.5"/><path d="M6.4 4.5V3h3.2v1.5"/></svg>
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#5c564f" stroke-width="1.4"><path d="M8 2.5v8"/><path d="M5 7.5L8 10.8l3-3.3"/><path d="M2.5 12.5h11"/></svg>
+    </div>
+    <div style="margin-left:auto;font:500 12px 'Instrument Sans',sans-serif;color:#8a837b">3 messages</div>
+  </div>
+  <div style="flex:1;overflow:hidden;display:flex;flex-direction:column">
+    <div style="padding:26px 48px 18px;border-bottom:1px solid rgba(0,0,0,.07)">
+      <div style="font:600 24px/1.25 'Instrument Sans',sans-serif;color:#1b1917;letter-spacing:-.015em">Two dates that work for the walkthrough</div>
+      <div style="display:flex;gap:7px;margin-top:12px"><span style="padding:3px 9px;border-radius:5px;background:#e2eaf7;font:600 10.5px 'Instrument Sans',sans-serif;color:#1d4489;letter-spacing:.03em">PERSONAL</span><span style="font:400 12px 'Instrument Sans',sans-serif;color:#8a837b;align-self:center">Hana Ferreira, me</span></div>
+    </div>
+    <div style="flex:1;overflow:hidden">
+      <div style="padding:16px 48px;border-bottom:1px solid rgba(0,0,0,.055);display:flex;gap:12px;align-items:center;background:#f6f3ee">
+        <div style="width:28px;height:28px;border-radius:50%;background:#e2e4dc;display:flex;align-items:center;justify-content:center;font:600 11px 'Instrument Sans',sans-serif;color:#5b6a52;flex:none">HF</div>
+        <div style="font:500 12.5px 'Instrument Sans',sans-serif;color:#3f3a35">Hana Ferreira</div>
+        <div style="font:400 12.5px 'Instrument Sans',sans-serif;color:#8a837b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Are you around next week at all? I'd like to see the space before…</div>
+        <div style="margin-left:auto;font:400 11.5px 'Instrument Sans',sans-serif;color:#a09890;flex:none">Mon</div>
+      </div>
+      <div style="padding:16px 48px;border-bottom:1px solid rgba(0,0,0,.055);display:flex;gap:12px;align-items:center;background:#f6f3ee">
+        <div style="width:28px;height:28px;border-radius:50%;background:#d7e2f4;display:flex;align-items:center;justify-content:center;font:600 11px 'Instrument Sans',sans-serif;color:#2c5fb8;flex:none">You</div>
+        <div style="font:500 12.5px 'Instrument Sans',sans-serif;color:#3f3a35">Me</div>
+        <div style="font:400 12.5px 'Instrument Sans',sans-serif;color:#8a837b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Most of next week is open. Send two dates and I'll hold both.</div>
+        <div style="margin-left:auto;font:400 11.5px 'Instrument Sans',sans-serif;color:#a09890;flex:none">Tue</div>
+      </div>
+      <div style="padding:24px 48px 30px">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:18px">
+          <div style="width:34px;height:34px;border-radius:50%;background:#e2e4dc;display:flex;align-items:center;justify-content:center;font:600 12px 'Instrument Sans',sans-serif;color:#5b6a52">HF</div>
+          <div><div style="font:600 13.5px 'Instrument Sans',sans-serif;color:#1b1917">Hana Ferreira</div><div style="font:400 11.5px 'Instrument Sans',sans-serif;color:#8a837b">to me · Yesterday at 4:38 PM</div></div>
+          <div style="margin-left:auto;display:flex;gap:8px">
+            <div style="padding:6px 12px;border-radius:7px;background:#2c5fb8;font:500 12px 'Instrument Sans',sans-serif;color:#fff">Reply</div>
+            <div style="padding:6px 12px;border-radius:7px;border:1px solid rgba(0,0,0,.12);font:500 12px 'Instrument Sans',sans-serif;color:#3f3a35">Forward</div>
+          </div>
+        </div>
+        <div style="font:400 16px/1.75 Newsreader,Georgia,serif;color:#241f1b;max-width:62ch">
+          <p style="margin:0 0 16px">The 14th in the morning or the 17th any time after lunch. Either works on my end, so pick whichever is easier and I'll put it in the book.</p>
+          <p style="margin:0 0 16px">One thing worth knowing before you come: the freight lift is out until the end of the month, so anything heavy has to go up the back stairs. It hasn't stopped anyone yet, but people like to be warned.</p>
+          <p style="margin:0">Hana</p>
+        </div>
+        <div style="margin-top:28px;padding:14px 16px;border:1px solid rgba(0,0,0,.1);border-radius:9px;background:#fff;display:flex;align-items:center;gap:10px">
+          <div style="width:28px;height:28px;border-radius:50%;background:#d7e2f4;display:flex;align-items:center;justify-content:center;font:600 11px 'Instrument Sans',sans-serif;color:#2c5fb8">You</div>
+          <span style="font:400 13px 'Instrument Sans',sans-serif;color:#a09890">Write a reply…</span>
+          <div style="margin-left:auto;padding:6px 14px;border-radius:7px;background:#f2efe9;font:500 12px 'Instrument Sans',sans-serif;color:#a09890">Send</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- 1c COMPOSE -->
+<div id="1c" style="display:flex;flex-direction:column;gap:9px;scroll-margin-top:16px">
+<div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 'Instrument Sans',sans-serif;color:rgba(0,0,0,.55)"><a href="#1c" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1b1917;border-radius:5px;text-decoration:none">1c</a>Compose</div>
+<div style="width:620px;height:520px;background:#faf8f5;border-radius:12px;box-shadow:0 24px 60px rgba(40,32,20,.18),0 2px 6px rgba(40,32,20,.1);overflow:hidden;display:flex;flex-direction:column">
+  <div style="height:44px;flex:none;display:flex;align-items:center;gap:14px;padding:0 14px;background:#f2efe9;border-bottom:1px solid rgba(0,0,0,.07);position:relative">
+    <div style="display:flex;gap:8px"><div style="width:12px;height:12px;border-radius:50%;background:#ff5f57"></div><div style="width:12px;height:12px;border-radius:50%;background:#febc2e"></div><div style="width:12px;height:12px;border-radius:50%;background:#28c840"></div></div>
+    <div style="margin-left:14px;font:600 12.5px 'Instrument Sans',sans-serif;color:#5c564f">New message</div>
+    <div style="margin-left:auto;display:flex;align-items:center;gap:14px">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#5c564f" stroke-width="1.4"><path d="M10 3.5L6 7.5a2 2 0 002.8 2.8l4-4a3.2 3.2 0 00-4.5-4.5l-4.4 4.4a4.5 4.5 0 006.4 6.4l3.2-3.2"/></svg>
+      <div style="display:flex;align-items:center;gap:7px;padding:5px 13px;border-radius:7px;background:#2c5fb8;font:600 12px 'Instrument Sans',sans-serif;color:#fff">Send</div>
+    </div>
+  </div>
+  <div style="padding:0 20px">
+    <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid rgba(0,0,0,.07)">
+      <span style="width:50px;font:500 12px 'Instrument Sans',sans-serif;color:#a09890">From</span>
+      <span style="font:400 13px 'Instrument Sans',sans-serif;color:#3f3a35">jo@westfold.studio</span>
+      <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="#a09890" stroke-width="1.6"><path d="M4 6.5L8 10.5 12 6.5"/></svg>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid rgba(0,0,0,.07)">
+      <span style="width:50px;font:500 12px 'Instrument Sans',sans-serif;color:#a09890">To</span>
+      <span style="display:flex;align-items:center;gap:7px;padding:3px 9px 3px 4px;border-radius:20px;background:#e2eaf7;font:500 12px 'Instrument Sans',sans-serif;color:#1d4489"><span style="width:18px;height:18px;border-radius:50%;background:#d7e2f4;display:flex;align-items:center;justify-content:center;font:600 9px 'Instrument Sans',sans-serif">HF</span>Hana Ferreira</span>
+      <span style="font:400 13px 'Instrument Sans',sans-serif;color:#c9c2b9">|</span>
+      <span style="margin-left:auto;font:500 12px 'Instrument Sans',sans-serif;color:#a09890">Cc</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid rgba(0,0,0,.07)">
+      <span style="width:50px;font:500 12px 'Instrument Sans',sans-serif;color:#a09890">Subject</span>
+      <span style="font:500 13.5px 'Instrument Sans',sans-serif;color:#1b1917">Re: Two dates that work for the walkthrough</span>
+    </div>
+  </div>
+  <div style="flex:1;padding:22px 20px;font:400 15px/1.7 Newsreader,Georgia,serif;color:#241f1b">
+    <p style="margin:0 0 14px">The 17th after lunch, then — say two o'clock. I'll bring the floor plan and the</p>
+    <p style="margin:0;color:#241f1b"><span style="border-right:1.5px solid #2c5fb8;padding-right:1px"></span></p>
+  </div>
+  <div style="flex:none;padding:11px 20px;border-top:1px solid rgba(0,0,0,.07);display:flex;align-items:center;gap:18px;background:#f6f3ee">
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#6f6963" stroke-width="1.4"><path d="M3 4h10M3 8h10M3 12h7"/></svg>
+    <span style="font:600 13px 'Instrument Sans',sans-serif;color:#6f6963">B</span>
+    <span style="font:italic 400 13px Newsreader,serif;color:#6f6963">I</span>
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#6f6963" stroke-width="1.4"><path d="M6 3H4.2a2.8 2.8 0 000 5.6H6"/><path d="M10 12.6h1.8a2.8 2.8 0 000-5.6H10"/><path d="M5.5 7.8h5"/></svg>
+    <span style="margin-left:auto;font:400 11.5px 'Instrument Sans',sans-serif;color:#a09890">Draft saved</span>
+  </div>
+</div>
+</div>
+
+<!-- 1d SETTINGS -->
+<div id="1d" style="display:flex;flex-direction:column;gap:9px;scroll-margin-top:16px">
+<div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 'Instrument Sans',sans-serif;color:rgba(0,0,0,.55)"><a href="#1d" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1b1917;border-radius:5px;text-decoration:none">1d</a>Settings — one flat list, no tabs</div>
+<div style="width:620px;height:600px;background:#faf8f5;border-radius:12px;box-shadow:0 24px 60px rgba(40,32,20,.18),0 2px 6px rgba(40,32,20,.1);overflow:hidden;display:flex;flex-direction:column">
+  <div style="height:44px;flex:none;display:flex;align-items:center;padding:0 14px;background:#f2efe9;border-bottom:1px solid rgba(0,0,0,.07);position:relative">
+    <div style="display:flex;gap:8px"><div style="width:12px;height:12px;border-radius:50%;background:#ff5f57"></div><div style="width:12px;height:12px;border-radius:50%;background:#febc2e"></div><div style="width:12px;height:12px;border-radius:50%;background:#28c840"></div></div>
+    <div style="position:absolute;left:0;right:0;text-align:center;font:600 12.5px 'Instrument Sans',sans-serif;color:#5c564f">Settings</div>
+  </div>
+  <div style="flex:1;padding:24px 28px;display:flex;flex-direction:column;gap:22px;overflow:hidden">
+    <div>
+      <div style="font:600 10px 'Instrument Sans',sans-serif;letter-spacing:.09em;text-transform:uppercase;color:#a09890;margin-bottom:10px">Accounts</div>
+      <div style="border:1px solid rgba(0,0,0,.09);border-radius:9px;overflow:hidden;background:#fff">
+        <div style="display:flex;align-items:center;gap:11px;padding:12px 14px;border-bottom:1px solid rgba(0,0,0,.06)">
+          <span style="width:8px;height:8px;border-radius:50%;background:#2c5fb8"></span>
+          <div><div style="font:500 13px 'Instrument Sans',sans-serif;color:#1b1917">Personal</div><div style="font:400 11.5px 'Instrument Sans',sans-serif;color:#8a837b">jo@westfold.studio</div></div>
+          <span style="margin-left:auto;font:400 11.5px 'Instrument Sans',sans-serif;color:#a09890">IMAP</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:11px;padding:12px 14px">
+          <span style="width:8px;height:8px;border-radius:50%;background:#7a8f6d"></span>
+          <div><div style="font:500 13px 'Instrument Sans',sans-serif;color:#1b1917">Studio</div><div style="font:400 11.5px 'Instrument Sans',sans-serif;color:#8a837b">hello@westfold.studio</div></div>
+          <span style="margin-left:auto;font:400 11.5px 'Instrument Sans',sans-serif;color:#a09890">IMAP</span>
+        </div>
+      </div>
+      <div style="margin-top:9px;font:500 12px 'Instrument Sans',sans-serif;color:#2c5fb8">Add account</div>
+    </div>
+    <div>
+      <div style="font:600 10px 'Instrument Sans',sans-serif;letter-spacing:.09em;text-transform:uppercase;color:#a09890;margin-bottom:10px">General</div>
+      <div style="border:1px solid rgba(0,0,0,.09);border-radius:9px;overflow:hidden;background:#fff">
+        <div style="display:flex;align-items:center;padding:12px 14px;border-bottom:1px solid rgba(0,0,0,.06)">
+          <div><div style="font:500 13px 'Instrument Sans',sans-serif;color:#1b1917">Check for new mail</div></div>
+          <div style="margin-left:auto;display:flex;align-items:center;gap:6px;padding:4px 9px;border-radius:6px;border:1px solid rgba(0,0,0,.12);font:500 12px 'Instrument Sans',sans-serif;color:#3f3a35">Every 5 minutes<svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="#a09890" stroke-width="1.8"><path d="M4 6.5L8 10.5 12 6.5"/></svg></div>
+        </div>
+        <div style="display:flex;align-items:center;padding:12px 14px;border-bottom:1px solid rgba(0,0,0,.06)">
+          <div><div style="font:500 13px 'Instrument Sans',sans-serif;color:#1b1917">Load remote images</div><div style="font:400 11.5px 'Instrument Sans',sans-serif;color:#8a837b;margin-top:1px">Off keeps senders from knowing you opened a message</div></div>
+          <div style="margin-left:auto;width:38px;height:22px;border-radius:11px;background:#ddd8d0;position:relative;flex:none"><div style="position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.2)"></div></div>
+        </div>
+        <div style="display:flex;align-items:center;padding:12px 14px;border-bottom:1px solid rgba(0,0,0,.06)">
+          <div style="font:500 13px 'Instrument Sans',sans-serif;color:#1b1917">Group messages by thread</div>
+          <div style="margin-left:auto;width:38px;height:22px;border-radius:11px;background:#2c5fb8;position:relative;flex:none"><div style="position:absolute;top:2px;right:2px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.2)"></div></div>
+        </div>
+        <div style="display:flex;align-items:center;padding:12px 14px">
+          <div style="font:500 13px 'Instrument Sans',sans-serif;color:#1b1917">Undo send window</div>
+          <div style="margin-left:auto;display:flex;align-items:center;gap:6px;padding:4px 9px;border-radius:6px;border:1px solid rgba(0,0,0,.12);font:500 12px 'Instrument Sans',sans-serif;color:#3f3a35">10 seconds<svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="#a09890" stroke-width="1.8"><path d="M4 6.5L8 10.5 12 6.5"/></svg></div>
+        </div>
+      </div>
+    </div>
+    <div>
+      <div style="font:600 10px 'Instrument Sans',sans-serif;letter-spacing:.09em;text-transform:uppercase;color:#a09890;margin-bottom:10px">Signature</div>
+      <div style="border:1px solid rgba(0,0,0,.09);border-radius:9px;background:#fff;padding:12px 14px;font:400 13px/1.6 Newsreader,Georgia,serif;color:#3f3a35">Jo Adeyemi<br>Westfold Studio · +1 415 555 0147</div>
+    </div>
+  </div>
+</div>
+</div>
+
+</div>
+<p style="margin:26px 0 0;font:12px/1.5 'Instrument Sans',sans-serif;color:rgba(0,0,0,.5)">Try next: "make <a href="#1a">1a</a> denser — one line per message" · "dark mode version of <a href="#1b">1b</a>" · "add a search results screen"</p>
+</section>
+</x-dc>
+</body>
+</html>

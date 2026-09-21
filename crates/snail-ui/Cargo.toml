@@ -1,0 +1,13 @@
+[package]
+name = "snail-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Snail's pure UI model: no UI framework, only serde. Decided and tested without pixels."
+
+# Only serde/serde_json. Everything that can be decided without pixels lives here so it is
+# testable in seconds without building GPUI (plan.md §2).
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
