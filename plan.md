@@ -1091,20 +1091,33 @@ dispatches for real (7.12). Outstanding: iCloud's SMTP send — the other half o
 
 ### E9 — Search
 
-- [ ] 9.1 — FTS5 virtual table over subject, sender, recipients and body text, kept in sync by
-      triggers in the same transaction as the message write.
-- [ ] 9.2 — Query language in `snail-ui`, parsed and unit-tested: bare terms, quoted phrases,
+- [x] 9.1 — FTS5 virtual table over subject, sender, recipients and body text, kept in sync by
+      triggers in the same transaction as the message write. *(Done: v4 adds `message.body_text` and
+      an external-content `message_fts` with insert/update/delete triggers. The delete trigger
+      passes the old values explicitly, which is what lets FTS5 coexist with v1's `ON DELETE
+      CASCADE`; schema tests cover both a cascade and backfilling an existing store.)*
+- [x] 9.2 — Query language in `snail-ui`, parsed and unit-tested: bare terms, quoted phrases,
       `from:`, `to:`, `subject:`, `has:attachment`, `is:unread`, `in:mailbox`, `before:`/`after:`,
       and date words ("yesterday", "last week"). Falls back to a plain term on a parse error rather
-      than erroring.
-- [ ] 9.3 — Search runs on the background executor with a generation guard; results stream into a
-      grouped list. Budget: first results under 50 ms on the 200k fixture (§4).
-- [ ] 9.4 — Grouped results in one `uniform_list` by normalizing group-header rows to the same
-      height as result rows — the trick Ferrite used for its grouped search screen.
-- [ ] 9.5 — Search is local-only and works offline. **No provider search API** — the local index is
-      always authoritative, which is also what makes it instant.
-- [ ] 9.6 — `⌘F` focuses search; Escape clears and restores the previous list; the query survives
-      switching mailboxes.
+      than erroring. *(Done: `snail_ui::search`, nine tests, including the two-token `last week` and
+      the unclosed-quote fallback. `has:attachment` needed `message.has_attachments` to actually be
+      populated, which the insert path now does.)*
+- [x] 9.3 — Search runs on the background executor with a generation guard; results stream into a
+      grouped list. Budget: first results under 50 ms on the 200k fixture (§4). *(Done:
+      `MailModel::search` on `cx.background_executor()`, guarded by `search_generation`. Budget met:
+      **22.3 ms** for a term plus a flag over 200k (BENCH.md). Results arrive in one bounded batch
+      (300), not incrementally — "stream" as in "appear without blocking the UI".)*
+- [x] 9.4 — Grouped results in one `uniform_list` by normalizing group-header rows to the same
+      height as result rows — the trick Ferrite used for its grouped search screen. *(Done: mailbox
+      headers are drawn at `text::message_row_height()`, the same as a hit, so one `uniform_list`
+      holds both.)*
+- [x] 9.5 — Search is local-only and works offline. **No provider search API** — the local index is
+      always authoritative, which is also what makes it instant. *(Done: `Store::search` is pure
+      SQLite; nothing in the search path touches a provider.)*
+- [x] 9.6 — `⌘F` focuses search; Escape clears and restores the previous list; the query survives
+      switching mailboxes. *(Done: `⌘F` focuses the input, which clears itself on Escape
+      (`clean_on_escape`), and a root Escape clears an unfocused active search; `select_mailbox`
+      leaves the query alone and the list keeps showing results.)*
 
 ### E10 — PGP
 *In v1 at the owner's request. Deliberately placed after the mail client works, because it is

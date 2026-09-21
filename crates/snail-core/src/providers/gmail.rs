@@ -579,6 +579,8 @@ impl GmailClient {
                 date: parsed.date,
                 preview: parsed.preview,
                 unread: meta.label_ids.iter().any(|label| label == "UNREAD"),
+                has_attachments: !parsed.attachments.is_empty(),
+                body_text: parsed.plain.map(|plain| crate::mime::search_text(&plain)),
                 raw_hash: Some(raw_hash),
                 labels_json: Some(serde_json::to_string(&meta.label_ids)?),
                 ..Default::default()

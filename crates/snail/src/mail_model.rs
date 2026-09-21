@@ -11,7 +11,7 @@ use snail_core::mime::{BodyPreference, ParsedMessage};
 use snail_core::store::Store;
 
 // The shell sees these through the model, so it never names the store.
-pub use snail_core::store::{MailboxRow, MessageRow};
+pub use snail_core::store::{MailboxRow, MessageRow, SearchHit};
 
 #[derive(Clone)]
 pub struct MailModel {
@@ -105,6 +105,28 @@ impl MailModel {
         self.store
             .suggest_contacts(account_id, prefix, limit)
             .unwrap_or_default()
+    }
+
+    /// Full-text search, local only (E9.1/E9.5). Runs on the background executor in the shell.
+    pub fn search(&self, query: &snail_core::store::SearchQuery, limit: u32) -> Vec<SearchHit> {
+        self.store.search(query, limit).unwrap_or_default()
+    }
+
+    /// Translate the parsed UI query into the store's criteria (the two crates do not depend on
+    /// each other, so the bin is where they meet).
+    pub fn search_criteria(query: &snail_ui::search::Query) -> snail_core::store::SearchQuery {
+        snail_core::store::SearchQuery {
+            terms: query.terms.clone(),
+            phrases: query.phrases.clone(),
+            from: query.from.clone(),
+            to: query.to.clone(),
+            subject: query.subject.clone(),
+            mailbox: query.mailbox.clone(),
+            unread: query.unread,
+            has_attachment: query.has_attachment,
+            after: query.after,
+            before: query.before,
+        }
     }
 
     /// Rebuild the contacts table from the messages already on disk (E7.3).

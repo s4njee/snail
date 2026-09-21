@@ -69,6 +69,15 @@ impl Default for Body {
 
 pub const PREVIEW_CHARS: usize = 240;
 
+/// The plain-text body kept for full-text search (E9.1), capped so one pathological message cannot
+/// bloat the store. The exact bytes still live content-addressed in the cache (E2.3).
+pub const SEARCH_TEXT_CHARS: usize = 200_000;
+
+/// The searchable plain text of a body: the whole plain-text view, clamped to [`SEARCH_TEXT_CHARS`].
+pub fn search_text(plain: &str) -> String {
+    plain.chars().take(SEARCH_TEXT_CHARS).collect()
+}
+
 /// Parse a raw RFC822 message into the fields the store keeps.
 pub fn parse_raw(bytes: &[u8]) -> Result<ParsedMessage> {
     parse_raw_with_preference(bytes, BodyPreference::Html)

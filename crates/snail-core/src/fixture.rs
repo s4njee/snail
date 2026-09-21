@@ -241,6 +241,7 @@ pub struct BenchReport {
     pub page_p99_ms: f64,
     pub thread_assemble_ms: f64,
     pub unread_counts_ms: f64,
+    pub search_ms: f64,
     pub messages: i64,
 }
 
@@ -275,12 +276,25 @@ pub fn benchmark(store: &Store) -> Result<BenchReport> {
     }
     let unread_counts_ms = started.elapsed().as_secs_f64() * 1000.0;
 
+    // E9.3's budget: the whole-fixture search, a term plus a flag, as the first page of results.
+    let started = Instant::now();
+    let _ = store.search(
+        &crate::store::SearchQuery {
+            terms: vec!["almanac".into()],
+            unread: Some(true),
+            ..Default::default()
+        },
+        300,
+    )?;
+    let search_ms = started.elapsed().as_secs_f64() * 1000.0;
+
     Ok(BenchReport {
         cold_open_ms: 0.0,
         page_p50_ms: p(50.0),
         page_p99_ms: p(99.0),
         thread_assemble_ms,
         unread_counts_ms,
+        search_ms,
         messages,
     })
 }

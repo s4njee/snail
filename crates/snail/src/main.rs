@@ -230,6 +230,8 @@ fn run_store_cli(paths: &Paths, args: &[String]) -> anyhow::Result<()> {
             date: parsed.date,
             preview: parsed.preview,
             unread: true,
+            has_attachments: !parsed.attachments.is_empty(),
+            body_text: parsed.plain.map(|plain| snail_core::mime::search_text(&plain)),
             raw_hash: Some(raw_hash),
             ..Default::default()
         })?;
@@ -270,6 +272,7 @@ fn run_store_cli(paths: &Paths, args: &[String]) -> anyhow::Result<()> {
         );
         println!("  thread assemble  {:>8.2} ms", report.thread_assemble_ms);
         println!("  unread counts    {:>8.2} ms", report.unread_counts_ms);
+        println!("  search (E9.3)    {:>8.2} ms", report.search_ms);
     }
     Ok(())
 }

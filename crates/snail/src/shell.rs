@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui_kit::component::input::{Textarea, TextareaState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -16,7 +16,7 @@ use snail_ui::text::TextRole;
 
 use crate::dev_overlay::DevOverlay;
 use crate::icons::{Icon, icon};
-use crate::mail_model::{MailModel, MailboxRow, MessageRow};
+use crate::mail_model::{MailModel, MailboxRow, MessageRow, SearchHit};
 use crate::settings;
 use crate::style::{self, ThemePref};
 
@@ -67,10 +67,26 @@ struct MovePicker {
     selected: usize,
 }
 
+/// Search state (E9.3): the results and whether the background query is still running.
+struct SearchResults {
+    hits: Vec<SearchHit>,
+    running: bool,
+    /// The parsed query, for the header line (e.g. `unread · from:alice`).
+    describe: String,
+}
+
+/// One row of the grouped search list (E9.4): a mailbox header or a hit. Both render at the same
+/// height so a single `uniform_list` can hold them.
+enum SearchListRow {
+    Header { name: String, count: usize },
+    Hit(usize),
+}
+
 pub struct Shell {
     focus: FocusHandle,
     overlay: DevOverlay,
     _appearance: Subscription,
+    _search_sub: Subscription,
     mail: MailModel,
     mailboxes: Vec<MailboxRow>,
     selected_mailbox: usize,
@@ -91,6 +107,15 @@ pub struct Shell {
     group_threads: bool,
     /// The open "move to mailbox" picker, if any (E8.4).
     move_picker: Option<MovePicker>,
+    /// The search box and its state (E9.3/E9.6). `search` is `Some` exactly when the box is
+    /// non-empty, and the list then shows results regardless of the selected mailbox (E9.6).
+    search_input: Entity<InputState>,
+    search_query: String,
+    search: Option<SearchResults>,
+    search_generation: u64,
+    /// The message whose reading is loaded, so render can reload it when the cursor moves without a
+    /// handler (a search result arriving on the background executor sets the cursor).
+    reading_id: Option<i64>,
     /// Set when the user clicks "Load images" for the current message (E6.2), independent of the
     /// global switch and the per-sender allowance.
     forced_message: Option<i64>,
@@ -120,10 +145,21 @@ impl Shell {
             }
         });
         let inline_reply = cx.new(|cx| TextareaState::new(window, cx).placeholder("Write a reply…"));
+        let search_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Search mail")
+                .clean_on_escape()
+        });
+        let search_sub = cx.subscribe(&search_input, |this, _state, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.on_search_changed(cx);
+            }
+        });
         let mut shell = Self {
             focus,
             overlay: DevOverlay::new(),
             _appearance: appearance,
+            _search_sub: search_sub,
             mail,
             mailboxes: Vec::new(),
             selected_mailbox: 0,
@@ -139,6 +175,11 @@ impl Shell {
             undo: None,
             group_threads: true,
             move_picker: None,
+            search_input,
+            search_query: String::new(),
+            search: None,
+            search_generation: 0,
+            reading_id: None,
             forced_message: None,
             html_width: None,
             html_relayout: None,
@@ -191,6 +232,12 @@ impl Shell {
             self.rows.len(),
             self.selected_mailbox
         );
+        if self.search.is_some() {
+            // The list is showing results, so refresh them instead of the mailbox rows (E9.6): a
+            // triage that emptied a result must disappear from the results.
+            self.run_search(cx);
+            return;
+        }
         let ids: Vec<i64> = self.rows.iter().map(|row| row.id).collect();
         self.selection.reconcile(&ids);
         if self.selection.cursor().is_none() {
@@ -223,6 +270,7 @@ impl Shell {
             .selection
             .cursor()
             .and_then(|id| self.read_message(id, window, cx));
+        self.reading_id = self.selection.cursor();
 
         // If a message has remote images and the user has unblocked them, fetch on the background
         // executor; the result lands in `pending_remote` and is applied on the next render (E6.8).
@@ -745,21 +793,91 @@ impl Shell {
     }
 
     fn list(&self, palette: &snail_ui::theme::Theme, cx: &mut Context<Self>) -> AnyElement {
-        let rows = self.rows.clone();
-        let selection = self.selection.clone();
-        let row_ids = Arc::new(self.rows.iter().map(|row| row.id).collect::<Vec<i64>>());
         let weak = cx.entity().downgrade();
-        let count = self.rows.len();
-        let title = self
-            .mailboxes
-            .get(self.selected_mailbox)
-            .map(|mailbox| mailbox.name.clone())
-            .unwrap_or_else(|| "Mail".into());
-        let unread = self
-            .mailboxes
-            .get(self.selected_mailbox)
-            .map(|mailbox| mailbox.unread)
-            .unwrap_or(0);
+        let selection = self.selection.clone();
+
+        // Header: the mailbox, or the active query and its result count (E9.3).
+        let (title, meta) = match &self.search {
+            Some(search) => (
+                if search.describe.is_empty() {
+                    "Search".to_string()
+                } else {
+                    search.describe.clone()
+                },
+                if search.running {
+                    "searching…".to_string()
+                } else {
+                    format!("{} results", search.hits.len())
+                },
+            ),
+            None => {
+                let title = self
+                    .mailboxes
+                    .get(self.selected_mailbox)
+                    .map(|mailbox| mailbox.name.clone())
+                    .unwrap_or_else(|| "Mail".into());
+                let unread = self
+                    .mailboxes
+                    .get(self.selected_mailbox)
+                    .map(|mailbox| mailbox.unread)
+                    .unwrap_or(0);
+                (title, format!("{unread} unread"))
+            }
+        };
+
+        let header = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .px_4()
+            .py_3()
+            .border_b_1()
+            .border_color(style::color(palette.colors.border_hairline))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(style::text(title, TextRole::ListHeaderTitle, cx))
+                    .child(style::text(meta, TextRole::ListHeaderMeta, cx)),
+            )
+            // Search always sits in the header, so an active query is visible and Escape-able (E9.6).
+            .child(div().child(Input::new(&self.search_input)));
+
+        let body = if let Some(search) = &self.search {
+            Self::search_results(palette, search, selection, weak, cx)
+        } else if self.rows.is_empty() {
+            div()
+                .flex_1()
+                .child(Self::empty_state(palette, cx, EmptyState::EmptyMailbox))
+                .into_any_element()
+        } else {
+            let rows = self.rows.clone();
+            let row_ids = Arc::new(self.rows.iter().map(|row| row.id).collect::<Vec<i64>>());
+            let count = self.rows.len();
+            div()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    uniform_list("message-list", count, move |range, _window, cx| {
+                        let palette = style::palette(cx);
+                        range
+                            .map(|index| {
+                                Self::row(
+                                    palette,
+                                    &rows[index],
+                                    selection.is_selected(rows[index].id),
+                                    weak.clone(),
+                                    row_ids.clone(),
+                                    cx,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .size_full(),
+                )
+                .into_any_element()
+        };
 
         div()
             .flex_none()
@@ -770,52 +888,125 @@ impl Shell {
             .bg(style::color(palette.colors.canvas))
             .border_r_1()
             .border_color(style::color(palette.colors.border_soft))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px_4()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(style::color(palette.colors.border_hairline))
-                    .child(style::text(title, TextRole::ListHeaderTitle, cx))
-                    .child(style::text(
-                        format!("{unread} unread"),
-                        TextRole::ListHeaderMeta,
-                        cx,
-                    )),
-            )
-            .child(if count == 0 {
-                div()
-                    .flex_1()
-                    .child(Self::empty_state(palette, cx, EmptyState::EmptyMailbox))
-                    .into_any_element()
-            } else {
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .child(
-                        uniform_list("message-list", count, move |range, _window, cx| {
-                            let palette = style::palette(cx);
-                            range
-                                .map(|index| {
-                                    Self::row(
-                                        palette,
-                                        &rows[index],
-                                        selection.is_selected(rows[index].id),
-                                        weak.clone(),
-                                        row_ids.clone(),
-                                        cx,
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .size_full(),
-                    )
-                    .into_any_element()
-            })
+            .child(header)
+            .child(body)
             .into_any_element()
+    }
+
+    /// The grouped search results: a mailbox header, then its hits, all in one `uniform_list`
+    /// because headers and hits share a height (E9.4).
+    fn search_results(
+        palette: &snail_ui::theme::Theme,
+        search: &SearchResults,
+        selection: Selection,
+        weak: WeakEntity<Self>,
+        cx: &App,
+    ) -> AnyElement {
+        if search.hits.is_empty() {
+            let message = if search.running {
+                "Searching…"
+            } else {
+                "No results"
+            };
+            return div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(style::text(message.to_string(), TextRole::ListHeaderMeta, cx))
+                .into_any_element();
+        }
+
+        let mut list_rows: Vec<SearchListRow> = Vec::new();
+        let mut index = 0;
+        while index < search.hits.len() {
+            let name = search.hits[index]
+                .mailbox_name
+                .clone()
+                .unwrap_or_else(|| "Other".into());
+            let start = index;
+            while index < search.hits.len()
+                && search.hits[index].mailbox_name == search.hits[start].mailbox_name
+            {
+                index += 1;
+            }
+            list_rows.push(SearchListRow::Header {
+                name,
+                count: index - start,
+            });
+            for hit in start..index {
+                list_rows.push(SearchListRow::Hit(hit));
+            }
+        }
+        let hits = Arc::new(search.hits.clone());
+        let list_rows = Arc::new(list_rows);
+        let count = list_rows.len();
+        let ids = Arc::new(search.hits.iter().map(|hit| hit.id).collect::<Vec<i64>>());
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .child(
+                uniform_list("search-results", count, move |range, _window, cx| {
+                    let palette = style::palette(cx);
+                    range
+                        .map(|index| match &list_rows[index] {
+                            SearchListRow::Header { name, count } => {
+                                Self::search_header(palette, name, *count, cx)
+                            }
+                            SearchListRow::Hit(hit) => {
+                                let row = Self::hit_row(&hits[*hit]);
+                                Self::row(
+                                    palette,
+                                    &row,
+                                    selection.is_selected(row.id),
+                                    weak.clone(),
+                                    ids.clone(),
+                                    cx,
+                                )
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .size_full(),
+            )
+            .into_any_element()
+    }
+
+    /// A group header, drawn at exactly a result row's height so one `uniform_list` holds both (9.4).
+    fn search_header(
+        palette: &snail_ui::theme::Theme,
+        name: &str,
+        count: usize,
+        cx: &App,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .px_4()
+            .h(px(snail_ui::text::message_row_height()))
+            .overflow_hidden()
+            .bg(style::color(palette.colors.sunken))
+            .border_b_1()
+            .border_color(style::color(palette.colors.border_hairline))
+            .child(style::text(name.to_string(), TextRole::SectionLabel, cx))
+            .child(style::text(count.to_string(), TextRole::SectionLabel, cx))
+            .into_any_element()
+    }
+
+    /// A search hit as a list row, so it reuses the message row exactly (E9.4).
+    fn hit_row(hit: &SearchHit) -> MessageRow {
+        MessageRow {
+            id: hit.id,
+            subject: hit.subject.clone(),
+            from_name: hit.from_name.clone(),
+            from_addr: hit.from_addr.clone(),
+            date: hit.date,
+            preview: hit.preview.clone(),
+            unread: hit.unread,
+            body_hash: None,
+        }
     }
 
     fn row(
@@ -992,6 +1183,83 @@ impl Shell {
         }
         self.reload(window, cx);
         cx.notify();
+    }
+
+    /// How many search results to ask for (E9.3): enough to feel complete, bounded for speed.
+    const SEARCH_LIMIT: u32 = 300;
+
+    /// ⌘F puts the caret in the search box (E9.6).
+    fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.search_input.clone();
+        input.update(cx, |state, cx| state.focus(window, cx));
+    }
+
+    fn on_search_changed(&mut self, cx: &mut Context<Self>) {
+        self.search_query = self.search_input.read(cx).value().to_string();
+        self.run_search(cx);
+    }
+
+    /// Clear the box and restore the mailbox list (E9.6). `set_value` does not emit `Change`, so the
+    /// rerun is explicit.
+    fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.search_input.clone();
+        input.update(cx, |state, cx| state.set_value("", window, cx));
+        self.search_query.clear();
+        self.run_search(cx);
+    }
+
+    /// Run the query on the background executor, guarded by a generation so a slow earlier query
+    /// cannot overwrite a newer one (E9.3).
+    fn run_search(&mut self, cx: &mut Context<Self>) {
+        self.search_generation += 1;
+        let generation = self.search_generation;
+        if self.search_query.trim().is_empty() {
+            self.search = None;
+            self.selection = Selection::new();
+            self.reading = None;
+            self.reading_id = None;
+            cx.notify();
+            return;
+        }
+        let parsed = snail_ui::search::parse(&self.search_query, current_epoch());
+        let criteria = MailModel::search_criteria(&parsed);
+        self.search = Some(SearchResults {
+            hits: Vec::new(),
+            running: true,
+            describe: parsed.describe(),
+        });
+        let mail = self.mail.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { mail.search(&criteria, Self::SEARCH_LIMIT) });
+        cx.spawn(async move |this, cx| {
+            let hits = task.await;
+            this.update(cx, |this, cx| {
+                if this.search_generation != generation {
+                    return;
+                }
+                let Some(mut search) = this.search.take() else {
+                    return;
+                };
+                search.hits = hits;
+                search.running = false;
+                this.search = Some(search);
+                let ids: Vec<i64> = this
+                    .search
+                    .as_ref()
+                    .map(|search| search.hits.iter().map(|hit| hit.id).collect())
+                    .unwrap_or_default();
+                this.selection.reconcile(&ids);
+                if this.selection.cursor().is_none() && !ids.is_empty() {
+                    this.selection.select(ids[0]);
+                }
+                // Render reloads the reading for whatever the cursor now is.
+                this.reading_id = None;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Open the move picker over the mailboxes other than the one being read (E8.4).
@@ -1605,6 +1873,13 @@ fn plain_body(text: String) -> BodyKind {
     }
 }
 
+fn current_epoch() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 fn short_date(epoch: Option<i64>) -> String {
     let Some(epoch) = epoch else {
         return String::new();
@@ -1640,6 +1915,11 @@ impl Render for Shell {
         // Apply any remote images that arrived since the last frame, then re-lay out (E6.8).
         self.apply_pending_images(window, cx);
         self.apply_pending_relayout(window, cx);
+        // A background search can move the cursor without a key or mouse handler; make the reading
+        // follow it (E9.3).
+        if self.selection.cursor().is_some() && self.reading_id != self.selection.cursor() {
+            self.load_reading(window, cx);
+        }
         // The undo bar auto-expires (E8.5): keep ticking while it is up, then clear it.
         if let Some(bar) = &self.undo {
             if bar.at.elapsed() >= Duration::from_secs(6) {
@@ -1686,7 +1966,10 @@ impl Render for Shell {
             None
         };
 
-        let ids: Vec<i64> = self.rows.iter().map(|row| row.id).collect();
+        let ids: Vec<i64> = match &self.search {
+            Some(search) => search.hits.iter().map(|hit| hit.id).collect(),
+            None => self.rows.iter().map(|row| row.id).collect(),
+        };
         let undo = self
             .undo
             .as_ref()
@@ -1790,6 +2073,8 @@ impl Render for Shell {
                     "c" => crate::compose::open(this.mail.clone(), Default::default(), cx),
                     "r" => this.compose_reply(event.keystroke.modifiers.shift, cx),
                     "f" => this.compose_forward(cx),
+                    // ⌘F focuses search (E9.6).
+                    "f" if modifiers.platform => this.focus_search(window, cx),
                     // Triage (E8): Cmd+Shift+A archive, Cmd+Backspace trash, e archives the
                     // conversation, u toggles read, g toggles thread grouping.
                     "a" if modifiers.platform && modifiers.shift => this.triage_selection(
@@ -1812,6 +2097,9 @@ impl Render for Shell {
                         this.group_threads = !this.group_threads;
                         this.reload(window, cx);
                     }
+                    // Escape clears an active search and restores the mailbox list (E9.6). When the
+                    // box has focus the input consumes Escape and clears itself instead.
+                    "escape" if this.search.is_some() => this.clear_search(window, cx),
                     _ => return,
                 }
                 cx.notify();

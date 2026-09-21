@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 
 /// `(name, sql)`, applied in order; index + 1 is the version it produces.
-pub const MIGRATIONS: &[(&str, &str)] = &[("v1", V1), ("v2", V2), ("v3", V3)];
+pub const MIGRATIONS: &[(&str, &str)] = &[("v1", V1), ("v2", V2), ("v3", V3), ("v4", V4)];
 
 /// The version a fresh store ends at.
 pub fn latest_version() -> u32 {
@@ -262,6 +262,44 @@ CREATE TABLE IF NOT EXISTS contact (
 CREATE INDEX IF NOT EXISTS contact_by_last_seen ON contact (account_id, last_seen DESC);
 "#;
 
+/// v4 adds full-text search (E9.1): a `body_text` column and an external-content FTS5 index over
+/// subject, sender, recipients and body.
+///
+/// The delete trigger passes the old column values **explicitly**. That is the whole trick that
+/// makes FTS5 coexist with v1's `ON DELETE CASCADE`: on a cascade the `message` row is already gone
+/// when the trigger fires, so an external-content delete that tried to read it back would fail. The
+/// values come from `old` instead.
+const V4: &str = r#"
+ALTER TABLE message ADD COLUMN body_text TEXT;
+
+CREATE VIRTUAL TABLE IF NOT EXISTS message_fts USING fts5(
+    subject, from_name, from_addr, to_json, cc_json, body_text,
+    content = 'message',
+    content_rowid = 'id',
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+
+CREATE TRIGGER IF NOT EXISTS message_fts_ai AFTER INSERT ON message BEGIN
+    INSERT INTO message_fts (rowid, subject, from_name, from_addr, to_json, cc_json, body_text)
+    VALUES (new.id, new.subject, new.from_name, new.from_addr, new.to_json, new.cc_json, new.body_text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS message_fts_ad AFTER DELETE ON message BEGIN
+    INSERT INTO message_fts (message_fts, rowid, subject, from_name, from_addr, to_json, cc_json, body_text)
+    VALUES ('delete', old.id, old.subject, old.from_name, old.from_addr, old.to_json, old.cc_json, old.body_text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS message_fts_au AFTER UPDATE OF subject, from_name, from_addr, to_json, cc_json, body_text ON message BEGIN
+    INSERT INTO message_fts (message_fts, rowid, subject, from_name, from_addr, to_json, cc_json, body_text)
+    VALUES ('delete', old.id, old.subject, old.from_name, old.from_addr, old.to_json, old.cc_json, old.body_text);
+    INSERT INTO message_fts (rowid, subject, from_name, from_addr, to_json, cc_json, body_text)
+    VALUES (new.id, new.subject, new.from_name, new.from_addr, new.to_json, new.cc_json, new.body_text);
+END;
+
+-- Index whatever is already on disk when this runs on an existing store (a no-op on a fresh one).
+INSERT INTO message_fts (message_fts) VALUES ('rebuild');
+"#;
+
 /// The schema version currently recorded, or 0 for an empty store.
 pub fn version(conn: &Connection) -> Result<u32> {
     use rusqlite::OptionalExtension as _;
@@ -387,5 +425,70 @@ mod tests {
             .query_row("SELECT count(*) FROM message", [], |r| r.get(0))
             .unwrap();
         assert_eq!(left, 0, "deleting an account removes its messages");
+    }
+
+    #[test]
+    fn the_search_index_tracks_inserts_and_cascades() {
+        let mut conn = memory();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        migrate(&mut conn, None).unwrap();
+        conn.execute(
+            "INSERT INTO account (id, kind, address, created_at) VALUES (1, 'gmail', 'a@b.c', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message (id, account_id, provider, subject, body_text)
+             VALUES (1, 1, 'gmail', 'Quarterly numbers', 'the almanac geometry checks out')",
+            [],
+        )
+        .unwrap();
+        let hits: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM message_fts WHERE message_fts MATCH 'almanac'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 1, "the insert trigger indexed the body");
+
+        // The interesting case: the FTS delete trigger must survive a foreign-key cascade, when the
+        // message row is already gone and cannot be read back from the content table.
+        conn.execute("DELETE FROM account WHERE id = 1", [])
+            .unwrap();
+        let hits: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM message_fts WHERE message_fts MATCH 'almanac'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 0, "the cascade removed the index row too");
+    }
+
+    #[test]
+    fn migrating_an_existing_store_backfills_the_index() {
+        let mut conn = memory();
+        migrate(&mut conn, Some(3)).unwrap();
+        conn.execute(
+            "INSERT INTO account (id, kind, address, created_at) VALUES (1, 'gmail', 'a@b.c', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message (id, account_id, provider, subject) VALUES (1, 1, 'gmail', 'legacy subject')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&mut conn, Some(4)).unwrap();
+        let hits: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM message_fts WHERE message_fts MATCH 'legacy'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 1, "the rebuild indexed a row that predates the migration");
     }
 }

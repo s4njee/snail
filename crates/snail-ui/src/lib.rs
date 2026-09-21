@@ -10,6 +10,7 @@ pub mod layout;
 pub mod motion;
 pub mod preview;
 pub mod selection;
+pub mod search;
 pub mod text;
 pub mod theme;
 pub mod threads;

@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
+use rusqlite::types::Value;
 use rusqlite::{Connection, params};
 
 use crate::cache::CacheStore;
@@ -45,9 +46,12 @@ pub struct NewMessage {
     pub date: Option<i64>,
     pub preview: Option<String>,
     pub unread: bool,
+    pub has_attachments: bool,
     pub body_hash: Option<String>,
     pub raw_hash: Option<String>,
     pub labels_json: Option<String>,
+    /// The plain-text body, for the FTS index (E9.1). Derived from the cached raw message.
+    pub body_text: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -177,6 +181,36 @@ pub struct ThreadRow {
     pub unread: i64,
 }
 
+/// The criteria a search runs against (E9.1/E9.2). The `snail-ui` parser produces the same shape;
+/// the bin maps one to the other, since neither crate depends on the other.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SearchQuery {
+    pub terms: Vec<String>,
+    pub phrases: Vec<String>,
+    pub from: Vec<String>,
+    pub to: Vec<String>,
+    pub subject: Vec<String>,
+    pub mailbox: Option<String>,
+    pub unread: Option<bool>,
+    pub has_attachment: bool,
+    pub after: Option<i64>,
+    pub before: Option<i64>,
+}
+
+/// One search result row, with its mailbox name so the list can group by mailbox (E9.4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchHit {
+    pub id: i64,
+    pub mailbox_id: Option<i64>,
+    pub mailbox_name: Option<String>,
+    pub subject: Option<String>,
+    pub from_name: Option<String>,
+    pub from_addr: Option<String>,
+    pub date: Option<i64>,
+    pub preview: Option<String>,
+    pub unread: bool,
+}
+
 pub struct Store {
     conn: Mutex<Connection>,
     cache: CacheStore,
@@ -286,10 +320,10 @@ impl Store {
                     imap_uid, imap_uidvalidity, imap_modseq,
                     message_id, in_reply_to, references_header,
                     subject, from_name, from_addr, to_json, date,
-                    preview, unread, body_hash, raw_hash, labels_json
+                    preview, unread, has_attachments, body_hash, raw_hash, labels_json, body_text
                  ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                    ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23
+                    ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25
                  )",
                 params![
                     message.account_id,
@@ -312,9 +346,11 @@ impl Store {
                     message.date,
                     message.preview,
                     message.unread as i64,
+                    message.has_attachments as i64,
                     message.body_hash,
                     message.raw_hash,
                     message.labels_json,
+                    message.body_text,
                 ],
             )?;
             Ok(conn.last_insert_rowid())
@@ -607,6 +643,85 @@ impl Store {
                 rolled_back += 1;
             }
             Ok(rolled_back)
+        })
+    }
+
+    /// Full-text plus filtered search (E9.1/E9.2/E9.5), newest first within each mailbox so the
+    /// list can group by mailbox with headers (E9.4). Local only: this never touches a provider.
+    pub fn search(&self, query: &SearchQuery, limit: u32) -> Result<Vec<SearchHit>> {
+        self.with_db(|conn| {
+            let mut sql = String::from(
+                "SELECT m.id, m.mailbox_id, b.name, m.subject, m.from_name, m.from_addr, m.date,
+                        m.preview, m.unread
+                 FROM message m LEFT JOIN mailbox b ON b.id = m.mailbox_id
+                 WHERE 1 = 1",
+            );
+            let mut values: Vec<Value> = Vec::new();
+
+            if let Some(expression) = fts_match(query) {
+                sql.push_str(" AND m.id IN (SELECT rowid FROM message_fts WHERE message_fts MATCH ?1)");
+                values.push(Value::Text(expression));
+            }
+            for value in &query.from {
+                sql.push_str(
+                    " AND (lower(COALESCE(m.from_name, '')) LIKE ? ESCAPE '\\'
+                          OR lower(COALESCE(m.from_addr, '')) LIKE ? ESCAPE '\\')",
+                );
+                let pattern = like_pattern(&value.to_lowercase());
+                values.push(Value::Text(pattern.clone()));
+                values.push(Value::Text(pattern));
+            }
+            for value in &query.to {
+                sql.push_str(
+                    " AND (lower(COALESCE(m.to_json, '')) LIKE ? ESCAPE '\\'
+                          OR lower(COALESCE(m.cc_json, '')) LIKE ? ESCAPE '\\')",
+                );
+                let pattern = like_pattern(&value.to_lowercase());
+                values.push(Value::Text(pattern.clone()));
+                values.push(Value::Text(pattern));
+            }
+            for value in &query.subject {
+                sql.push_str(" AND lower(COALESCE(m.subject, '')) LIKE ? ESCAPE '\\'");
+                values.push(Value::Text(like_pattern(&value.to_lowercase())));
+            }
+            if let Some(mailbox) = &query.mailbox {
+                sql.push_str(" AND lower(COALESCE(b.name, '')) = lower(?)");
+                values.push(Value::Text(mailbox.clone()));
+            }
+            match query.unread {
+                Some(true) => sql.push_str(" AND m.unread = 1"),
+                Some(false) => sql.push_str(" AND m.unread = 0"),
+                None => {}
+            }
+            if query.has_attachment {
+                sql.push_str(" AND m.has_attachments = 1");
+            }
+            if let Some(after) = query.after {
+                sql.push_str(" AND m.date >= ?");
+                values.push(Value::Integer(after));
+            }
+            if let Some(before) = query.before {
+                sql.push_str(" AND m.date < ?");
+                values.push(Value::Integer(before));
+            }
+            sql.push_str(" ORDER BY lower(COALESCE(b.name, '')) ASC, m.date DESC, m.id DESC LIMIT ?");
+            values.push(Value::Integer(limit as i64));
+
+            let mut statement = conn.prepare(&sql)?;
+            let rows = statement.query_map(rusqlite::params_from_iter(values.iter()), |row| {
+                Ok(SearchHit {
+                    id: row.get(0)?,
+                    mailbox_id: row.get(1)?,
+                    mailbox_name: row.get(2)?,
+                    subject: row.get(3)?,
+                    from_name: row.get(4)?,
+                    from_addr: row.get(5)?,
+                    date: row.get(6)?,
+                    preview: row.get(7)?,
+                    unread: row.get::<_, i64>(8)? != 0,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
     }
 
@@ -1254,6 +1369,41 @@ fn restore_triage_row(
     Ok(account_id)
 }
 
+/// Build the FTS5 MATCH expression (E9.1). Every term is quoted, so punctuation cannot be read as
+/// query syntax; a multi-word fallback term becomes a phrase. Terms with nothing indexable are
+/// dropped rather than handed to FTS5, which would reject them.
+fn fts_match(query: &SearchQuery) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for value in query.phrases.iter().chain(query.terms.iter()) {
+        if value.chars().any(char::is_alphanumeric) {
+            parts.push(quote_fts(value));
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" AND "))
+    }
+}
+
+fn quote_fts(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+/// A LIKE pattern matching `value` anywhere, escaping LIKE's metacharacters.
+fn like_pattern(value: &str) -> String {
+    let mut pattern = String::with_capacity(value.len() + 2);
+    pattern.push('%');
+    for ch in value.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(ch);
+    }
+    pattern.push('%');
+    pattern
+}
+
 fn kind_for_name(name: &str) -> &'static str {
     match name.to_ascii_lowercase().as_str() {
         "inbox" => "inbox",
@@ -1672,6 +1822,171 @@ mod tests {
         );
         // Rolling back again is a no-op.
         assert_eq!(store.rollback_failed_triage(3).unwrap(), 0);
+    }
+
+    #[test]
+    fn search_finds_body_text_and_applies_every_filter() {
+        let store = store_with_account();
+        let inbox = store.ensure_mailbox(1, "Inbox", "inbox").unwrap();
+        let archive = store.ensure_mailbox(1, "Archive", "archive").unwrap();
+        let insert = |mailbox: i64,
+                      id: &str,
+                      subject: &str,
+                      from: &str,
+                      date: i64,
+                      unread: bool,
+                      body: &str,
+                      has_attachments: bool| {
+            store
+                .insert_message(&NewMessage {
+                    account_id: 1,
+                    mailbox_id: Some(mailbox),
+                    provider: Some(ProviderRef::Gmail {
+                        id: id.into(),
+                        thread_id: None,
+                        history_id: None,
+                    }),
+                    subject: Some(subject.into()),
+                    from_addr: Some(from.into()),
+                    date: Some(date),
+                    unread,
+                    has_attachments,
+                    body_text: Some(body.into()),
+                    ..Default::default()
+                })
+                .unwrap()
+        };
+        let almanac = insert(
+            inbox,
+            "a",
+            "Almanac geometry",
+            "maya@example.com",
+            1000,
+            true,
+            "the 6x7 grid maths checks out",
+            false,
+        );
+        insert(
+            archive,
+            "b",
+            "Receipt",
+            "shop@example.com",
+            2000,
+            false,
+            "your order shipped",
+            true,
+        );
+
+        // Free text reaches the body; a phrase keeps its words together.
+        let hits = store
+            .search(
+                &SearchQuery {
+                    terms: vec!["almanac".into()],
+                    ..Default::default()
+                },
+                50,
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, almanac);
+        assert_eq!(hits[0].mailbox_name.as_deref(), Some("Inbox"));
+
+        let hits = store
+            .search(
+                &SearchQuery {
+                    phrases: vec!["grid maths".into()],
+                    ..Default::default()
+                },
+                50,
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1, "phrase spans the body");
+
+        // Field and flag filters.
+        assert_eq!(
+            store
+                .search(
+                    &SearchQuery {
+                        from: vec!["shop".into()],
+                        ..Default::default()
+                    },
+                    50,
+                )
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .search(
+                    &SearchQuery {
+                        subject: vec!["receipt".into()],
+                        ..Default::default()
+                    },
+                    50,
+                )
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .search(
+                    &SearchQuery {
+                        unread: Some(true),
+                        ..Default::default()
+                    },
+                    50,
+                )
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .search(
+                    &SearchQuery {
+                        has_attachment: true,
+                        ..Default::default()
+                    },
+                    50,
+                )
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .search(
+                    &SearchQuery {
+                        after: Some(1500),
+                        ..Default::default()
+                    },
+                    50,
+                )
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .search(
+                    &SearchQuery {
+                        mailbox: Some("Inbox".into()),
+                        ..Default::default()
+                    },
+                    50,
+                )
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // No criteria: newest first within mailbox, mailboxes ordered by name.
+        let hits = store.search(&SearchQuery::default(), 50).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].mailbox_name.as_deref(), Some("Archive"));
+        assert_eq!(hits[1].mailbox_name.as_deref(), Some("Inbox"));
     }
 
     #[test]

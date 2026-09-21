@@ -97,6 +97,13 @@ fn record_sent_copy(store: &Store, account_id: i64, raw: &[u8], now: i64) -> Res
         date: Some(now),
         preview: parsed.as_ref().and_then(|parsed| parsed.preview.clone()),
         unread: false,
+        has_attachments: parsed
+            .as_ref()
+            .is_some_and(|parsed| !parsed.attachments.is_empty()),
+        body_text: parsed
+            .as_ref()
+            .and_then(|parsed| parsed.plain.clone())
+            .map(|plain| snail_core::mime::search_text(&plain)),
         raw_hash: Some(hash),
         ..Default::default()
     };

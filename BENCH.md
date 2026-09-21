@@ -38,6 +38,23 @@ before enumeration per E4.2. **9.5 MB** of raw MIME in the content-addressed cac
 **Gap found and stated:** the raw fetch carries no labels, so backfilled messages have no mailbox
 yet; filing by label is the sync loop's job (E4.7/E8.6).
 
+## E9 — search, 2026-09-21
+
+Fixture: `snail --generate-fixture` — 200,000 messages, generated in **11.1 s** (up from ~3.0 s: the
+v4 FTS5 triggers index every insert). On disk the store grows by the FTS index; the plain-text body
+is capped at `mime::SEARCH_TEXT_CHARS`.
+
+Command: `SNAIL_CONFIG_DIR=… SNAIL_CACHE_DIR=… snail --bench-store`
+
+| Metric | Result | Budget (§4) |
+|---|---|---|
+| **Search, `almanac` + `is:unread`**, 300 results | **22.3 ms** | **< 50 ms** first results (E9.3) |
+
+**Finding:** the FTS5 external-content index keeps up: 22 ms for a term plus a flag over 200k
+messages, comfortably inside the 50 ms budget. The cache-side cost is the trigger on insert, which
+roughly quadrupled fixture generation — acceptable for a backfill that runs once.
+
+
 ## E4 — label → mailbox filing, 2026-09-21
 
 After adding `messages.get?format=minimal` for labels + thread, `--backfill-gmail --limit 150` on the
