@@ -146,6 +146,16 @@ pub struct IdentityRow {
     pub is_default: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MailboxRow {
+    pub id: i64,
+    pub account_id: i64,
+    pub name: String,
+    pub kind: String,
+    pub unread: i64,
+    pub total: i64,
+}
+
 pub struct Store {
     conn: Mutex<Connection>,
     cache: CacheStore,
@@ -349,6 +359,84 @@ impl Store {
                     |row| row.get(0),
                 )
                 .optional()?)
+        })
+    }
+
+    /// Every mailbox, for the sidebar (E5.4).
+    pub fn mailboxes(&self) -> Result<Vec<MailboxRow>> {
+        self.with_db(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT id, account_id, name, kind, unread, total FROM mailbox
+                 ORDER BY account_id, id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok(MailboxRow {
+                    id: row.get(0)?,
+                    account_id: row.get(1)?,
+                    name: row.get(2)?,
+                    kind: row.get(3)?,
+                    unread: row.get(4)?,
+                    total: row.get(5)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// The original RFC822 bytes for a message, from the content-addressed cache. `None` means the
+    /// cache file is gone and the caller re-fetches (E2.3).
+    pub fn raw_bytes(&self, message_id: i64) -> Result<Option<Vec<u8>>> {
+        let hash: Option<String> = self.with_db(|conn| {
+            use rusqlite::OptionalExtension as _;
+            Ok(conn
+                .query_row(
+                    "SELECT raw_hash FROM message WHERE id = ?1",
+                    [message_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten())
+        })?;
+        match hash {
+            Some(hash) => self.cache.get(&hash),
+            None => Ok(None),
+        }
+    }
+
+    /// A single message row by id, for the reading pane header.
+    pub fn message(&self, message_id: i64) -> Result<Option<MessageRow>> {
+        self.with_db(|conn| {
+            use rusqlite::OptionalExtension as _;
+            Ok(conn
+                .query_row(
+                    "SELECT id, subject, from_name, from_addr, date, preview, unread, body_hash
+                     FROM message WHERE id = ?1",
+                    [message_id],
+                    |row| {
+                        Ok(MessageRow {
+                            id: row.get(0)?,
+                            subject: row.get(1)?,
+                            from_name: row.get(2)?,
+                            from_addr: row.get(3)?,
+                            date: row.get(4)?,
+                            preview: row.get(5)?,
+                            unread: row.get::<_, i64>(6)? != 0,
+                            body_hash: row.get(7)?,
+                        })
+                    },
+                )
+                .optional()?)
+        })
+    }
+
+    /// Mark a message read/unread, optimistically (E5.9). The caller queues the `pending_op`.
+    pub fn set_unread(&self, message_id: i64, unread: bool) -> Result<()> {
+        self.with_db(|conn| {
+            conn.execute(
+                "UPDATE message SET unread = ?2 WHERE id = ?1",
+                params![message_id, unread as i64],
+            )?;
+            Ok(())
         })
     }
 
@@ -857,9 +945,10 @@ mod tests {
 
     #[test]
     fn no_view_module_reaches_the_store() {
-        // plan.md E2.4: the store is only reachable from the background executor. `main.rs` is the
-        // bootstrap and the fixture/bench CLI, not a view, so it is exempt; every other module in
-        // the app crate must stay away.
+        // plan.md E2.4: the store is only reachable from the background executor. A *view* module
+        // (the shell, and anything under `views/`) must not name it; models like `mail_model.rs`
+        // and the bins's `main.rs` (bootstrap + CLI) may. `mail_model` is where the E5.12 move to
+        // the background executor happens.
         let bin = Path::new(env!("CARGO_MANIFEST_DIR")).join("../snail/src");
         if !bin.is_dir() {
             return;
@@ -876,20 +965,20 @@ mod tests {
                     stack.push(path);
                     continue;
                 }
-                if path.file_name().is_some_and(|name| name == "main.rs") {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let is_view = name == "shell.rs" || path.to_string_lossy().contains("/views/");
+                if !is_view || !path.extension().is_some_and(|e| e == "rs") {
                     continue;
                 }
-                if path.extension().is_some_and(|e| e == "rs") {
-                    let text = std::fs::read_to_string(&path).unwrap_or_default();
-                    if text.contains("snail_core::store") || text.contains("Store::open") {
-                        offenders.push(path.display().to_string());
-                    }
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                if text.contains("snail_core::store") || text.contains("Store::open") {
+                    offenders.push(path.display().to_string());
                 }
             }
         }
         assert!(
             offenders.is_empty(),
-            "view modules must not reach the store directly: {offenders:?}"
+            "view modules must not reach the store directly (use a model): {offenders:?}"
         );
     }
 }

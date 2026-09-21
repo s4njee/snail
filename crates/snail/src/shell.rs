@@ -1,79 +1,124 @@
-//! The shell: titlebar, the unified sidebar, and the mail three-pane frame (plan.md E1.8). Real
-//! data arrives in E4/E5; the rows here are representative so the geometry and roles are visible.
-//! Everything reads tokens through `style`; no raw hex or size appears (E1.3).
+//! The shell: titlebar, the unified sidebar, and the mail three-pane frame over the real store
+//! (plan.md E1.8/E5). First cut: the store is read on the main thread at construction and on
+//! mailbox changes (cheap local queries); the background-executor move and the paint budget are
+//! E5.12's job.
+
+use std::sync::Arc;
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
-use snail_ui::empty::{self, EmptyState, IconHint};
+use snail_ui::empty::{EmptyState, IconHint};
+use snail_ui::selection::Selection;
 use snail_ui::text::TextRole;
 
 use crate::dev_overlay::DevOverlay;
 use crate::icons::{icon, Icon};
+use crate::mail_model::{MailModel, MailboxRow, MessageRow};
 use crate::settings;
 use crate::style::{self, ThemePref};
 
-/// sender, subject, preview, unread. Replace with the store in E5.
-const MESSAGES: &[(&str, &str, &str, bool)] = &[
-    (
-        "Priya Raman",
-        "Design review Thursday",
-        "I moved the review to Thursday so the tokens are merged first. Anything you want on the agenda?",
-        true,
-    ),
-    (
-        "GitHub",
-        "[snail] CI failed on main",
-        "Run 35553496010: spikes (ubuntu-latest) — Build E0.2. Open the log for details.",
-        true,
-    ),
-    (
-        "Maya Okonkwo",
-        "Re: Almanac calendar geometry",
-        "The 6×7 grid maths checks out at 27px. I left two notes on the overlap case.",
-        false,
-    ),
-    (
-        "Apple",
-        "An app-specific password was generated",
-        "If you did not do this, change your password immediately.",
-        false,
-    ),
-    (
-        "Stripe",
-        "Your payout is on the way",
-        "A payout of $1,240.00 should arrive in two business days.",
-        false,
-    ),
-];
+const ROW_HEIGHT: f32 = 84.0;
+const PAGE: u32 = 200;
+
+struct Reading {
+    subject: String,
+    from: String,
+    meta: String,
+    body: String,
+}
 
 pub struct Shell {
     focus: FocusHandle,
     overlay: DevOverlay,
-    /// Kept, not dropped: a dropped subscription cancels the OS appearance feed (E1.12).
     _appearance: Subscription,
+    mail: MailModel,
+    mailboxes: Vec<MailboxRow>,
+    selected_mailbox: usize,
+    rows: Arc<Vec<MessageRow>>,
+    selection: Selection,
+    reading: Option<Reading>,
 }
 
 impl Shell {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(mail: MailModel, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
-        // The shell takes focus at launch, or single-letter shortcuts dispatch above it (E15.5).
         window.focus(&focus, cx);
-        // While set to System, follow the OS flipping light/dark under us (E1.12).
         let appearance = cx.observe_window_appearance(window, |_this, _window, cx| {
             if settings::pref(cx) == ThemePref::System {
                 style::apply(ThemePref::System, cx);
                 cx.notify();
             }
         });
-        Self {
+        let mut shell = Self {
             focus,
             overlay: DevOverlay::new(),
             _appearance: appearance,
-        }
+            mail,
+            mailboxes: Vec::new(),
+            selected_mailbox: 0,
+            rows: Arc::new(Vec::new()),
+            selection: Selection::new(),
+            reading: None,
+        };
+        shell.reload();
+        shell
     }
 
-    fn titlebar(palette: &snail_ui::theme::Theme, _window: &mut Window, cx: &App) -> impl IntoElement {
+    /// Read mailboxes and the selected mailbox's page. Local and fast; E5.12 moves it off-thread.
+    fn reload(&mut self) {
+        self.mailboxes = self.mail.mailboxes();
+        if self.selected_mailbox >= self.mailboxes.len() {
+            self.selected_mailbox = 0;
+        }
+        let rows = self
+            .mailboxes
+            .get(self.selected_mailbox)
+            .map(|mailbox| self.mail.page(mailbox.id, PAGE))
+            .unwrap_or_default();
+        self.rows = Arc::new(rows);
+        let ids: Vec<i64> = self.rows.iter().map(|row| row.id).collect();
+        self.selection.reconcile(&ids);
+        if self.selection.cursor().is_none() {
+            if let Some(first) = ids.first() {
+                self.selection.select_in(&ids, *first);
+            }
+        }
+        self.load_reading();
+    }
+
+    fn select_mailbox(&mut self, index: usize) {
+        self.selected_mailbox = index;
+        self.selection = Selection::new();
+        self.reload();
+    }
+
+    fn load_reading(&mut self) {
+        self.reading = self.selection.cursor().and_then(|id| self.read_message(id));
+    }
+
+    fn read_message(&self, id: i64) -> Option<Reading> {
+        let row = self.mail.message(id)?;
+        let parsed = self.mail.parsed(id)?;
+        let body = parsed
+            .plain
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or_else(|| "(This message has no readable text part.)".to_string());
+        Some(Reading {
+            subject: row.subject.unwrap_or_else(|| "(no subject)".into()),
+            from: row
+                .from_name
+                .or(row.from_addr)
+                .unwrap_or_else(|| "(unknown sender)".into()),
+            meta: row
+                .date
+                .map(|date| format!("{date}"))
+                .unwrap_or_else(|| "(no date)".into()),
+            body,
+        })
+    }
+
+    fn titlebar(palette: &snail_ui::theme::Theme, _window: &mut Window, cx: &App) -> AnyElement {
         div()
             .h(px(palette.metrics.titlebar_h))
             .flex_none()
@@ -92,12 +137,12 @@ impl Shell {
                     .gap_3()
                     .when(cfg!(target_os = "macos"), |this| this.pl(px(78.0)))
                     .child(style::text("Snail", TextRole::ListHeaderTitle, cx))
-                    .child(style::text("E1 · design system", TextRole::SectionLabel, cx)),
+                    .child(style::text("Inbox", TextRole::SectionLabel, cx)),
             )
             .child(Self::window_controls(palette, cx))
+            .into_any_element()
     }
 
-    /// macOS uses the system traffic lights; Windows and Linux get drawn controls (E1.2/E18.5).
     fn window_controls(palette: &snail_ui::theme::Theme, cx: &App) -> AnyElement {
         #[cfg(target_os = "macos")]
         {
@@ -138,14 +183,8 @@ impl Shell {
         }
     }
 
-    fn sidebar(palette: &snail_ui::theme::Theme, cx: &App) -> impl IntoElement {
-        let items = [
-            ("Inbox", Icon::Inbox),
-            ("Sent", Icon::Send),
-            ("Drafts", Icon::Document),
-            ("Archive", Icon::Archive),
-            ("Trash", Icon::Trash),
-        ];
+    fn sidebar(&self, palette: &snail_ui::theme::Theme, cx: &mut Context<Self>) -> AnyElement {
+        let mailboxes = self.mailboxes.clone();
         div()
             .flex_none()
             .w(px(palette.metrics.sidebar_w))
@@ -164,33 +203,87 @@ impl Shell {
                     .pb_2()
                     .child(style::text("Mailboxes", TextRole::SectionLabel, cx)),
             )
-            .children(items.into_iter().enumerate().map(|(index, (name, glyph))| {
-                let selected = index == 0;
-                let role = if selected {
-                    TextRole::SidebarItemSelected
-                } else {
-                    TextRole::SidebarItem
-                };
-                let icon_color = if selected {
-                    palette.colors.accent
-                } else {
-                    palette.colors.muted
-                };
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .px_2()
-                    .py_1()
-                    .rounded(px(palette.radii.button))
-                    .when(selected, |this| this.bg(style::color(palette.colors.accent_tint_deep)))
-                    .child(icon(glyph).text_color(style::color(icon_color)))
-                    .child(style::text(name, role, cx))
+            .children(mailboxes.into_iter().enumerate().map(|(index, mailbox)| {
+                let selected = index == self.selected_mailbox;
+                Self::sidebar_item(palette, cx, index, mailbox, selected)
             }))
+            .into_any_element()
     }
 
-    fn mail_list(palette: &snail_ui::theme::Theme, cx: &App) -> impl IntoElement {
+    fn sidebar_item(
+        palette: &snail_ui::theme::Theme,
+        cx: &mut Context<Self>,
+        index: usize,
+        mailbox: MailboxRow,
+        selected: bool,
+    ) -> AnyElement {
+        let glyph = match mailbox.kind.as_str() {
+            "inbox" => Icon::Inbox,
+            "sent" => Icon::Send,
+            "drafts" => Icon::Document,
+            "archive" => Icon::Archive,
+            "trash" => Icon::Trash,
+            _ => Icon::List,
+        };
+        let role = if selected {
+            TextRole::SidebarItemSelected
+        } else {
+            TextRole::SidebarItem
+        };
+        let icon_color = if selected {
+            palette.colors.accent
+        } else {
+            palette.colors.muted
+        };
+        let count_color = if selected {
+            palette.colors.accent
+        } else {
+            palette.colors.soft
+        };
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .rounded(px(palette.radii.button))
+            .when(selected, |this| this.bg(style::color(palette.colors.accent_tint_deep)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event, _window, cx| {
+                    this.select_mailbox(index);
+                    cx.notify();
+                }),
+            )
+            .child(icon(glyph).text_color(style::color(icon_color)))
+            .child(div().flex_1().min_w_0().child(style::text(mailbox.name, role, cx)))
+            .when(mailbox.unread > 0, |this| {
+                this.child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(style::color(count_color))
+                        .child(mailbox.unread.to_string()),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn list(&self, palette: &snail_ui::theme::Theme, cx: &mut Context<Self>) -> AnyElement {
+        let rows = self.rows.clone();
+        let selection = self.selection.clone();
+        let count = self.rows.len();
+        let title = self
+            .mailboxes
+            .get(self.selected_mailbox)
+            .map(|mailbox| mailbox.name.clone())
+            .unwrap_or_else(|| "Mail".into());
+        let unread = self
+            .mailboxes
+            .get(self.selected_mailbox)
+            .map(|mailbox| mailbox.unread)
+            .unwrap_or(0);
+
         div()
             .flex_none()
             .w(px(palette.metrics.list_w))
@@ -209,30 +302,56 @@ impl Shell {
                     .py_3()
                     .border_b_1()
                     .border_color(style::color(palette.colors.border_hairline))
-                    .child(style::text("Inbox", TextRole::ListHeaderTitle, cx))
-                    .child(style::text("12 unread", TextRole::ListHeaderMeta, cx)),
+                    .child(style::text(title, TextRole::ListHeaderTitle, cx))
+                    .child(style::text(
+                        format!("{unread} unread"),
+                        TextRole::ListHeaderMeta,
+                        cx,
+                    )),
             )
-            .child(
+            .child(if count == 0 {
+                div()
+                    .flex_1()
+                    .child(Self::empty_state(palette, cx, EmptyState::EmptyMailbox))
+                    .into_any_element()
+            } else {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .children(MESSAGES.iter().enumerate().map(|(index, message)| {
-                        Self::message_row(palette, cx, index, *message)
-                    })),
-            )
+                    .child(uniform_list("message-list", count, move |range, _window, cx| {
+                        let palette = style::palette(cx);
+                        range
+                            .map(|index| {
+                                Self::row(palette, &rows[index], selection.is_selected(rows[index].id), cx)
+                            })
+                            .collect::<Vec<_>>()
+                    }))
+                    .into_any_element()
+            })
+            .into_any_element()
     }
 
-    fn message_row(
+    fn row(
         palette: &snail_ui::theme::Theme,
+        row: &MessageRow,
+        selected: bool,
         cx: &App,
-        index: usize,
-        (sender, subject, preview, unread): (&str, &str, &str, bool),
-    ) -> impl IntoElement {
-        let selected = index == 0;
-        let row = div()
+    ) -> AnyElement {
+        let sender = row
+            .from_name
+            .clone()
+            .or_else(|| row.from_addr.clone())
+            .unwrap_or_else(|| "(unknown)".into());
+        let subject = row.subject.clone().unwrap_or_else(|| "(no subject)".into());
+        let preview = row.preview.clone().unwrap_or_default();
+        let unread = row.unread;
+        let subject = snail_ui::preview::clamp(&subject, 1, 300.0, &|line| line.chars().count() as f32 * 7.0);
+        let preview = snail_ui::preview::clamp(&preview, 2, 300.0, &|line| line.chars().count() as f32 * 6.5);
+
+        let base = div()
             .relative()
+            .w_full()
+            .h(px(ROW_HEIGHT))
             .flex()
             .gap_2()
             .px_4()
@@ -240,10 +359,8 @@ impl Shell {
             .border_b_1()
             .border_color(style::color(palette.colors.border_hairline))
             .when(selected, |this| this.bg(style::color(palette.colors.accent_tint)))
-            .when(!selected, |this| {
-                this.hover(|s| s.bg(rgba(0x00000008)))
-            });
-        row.when(selected, |this| {
+            .when(!selected, |this| this.hover(|s| s.bg(rgba(0x00000008))));
+        base.when(selected, |this| {
             this.child(
                 div()
                     .absolute()
@@ -254,7 +371,6 @@ impl Shell {
                     .bg(style::color(palette.colors.accent)),
             )
         })
-        // Unread dot, or the same 7px of empty space so the text stays aligned (E5.2).
         .child(
             div()
                 .flex_none()
@@ -271,23 +387,15 @@ impl Shell {
                 .flex_1()
                 .min_w_0()
                 .gap_1()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .child(style::text(
-                            sender,
-                            if unread {
-                                TextRole::RowSenderUnread
-                            } else {
-                                TextRole::RowSenderRead
-                            },
-                            cx,
-                        ))
-                        .child(style::text("9:14 AM", TextRole::RowTimestamp, cx)),
-                )
+                .child(style::text(
+                    sender,
+                    if unread {
+                        TextRole::RowSenderUnread
+                    } else {
+                        TextRole::RowSenderRead
+                    },
+                    cx,
+                ))
                 .child(style::text(
                     subject,
                     if unread {
@@ -299,9 +407,13 @@ impl Shell {
                 ))
                 .child(style::text(preview, TextRole::RowPreview, cx)),
         )
+        .into_any_element()
     }
 
-    fn reading_pane(palette: &snail_ui::theme::Theme, cx: &App) -> impl IntoElement {
+    fn reading_pane(&self, palette: &snail_ui::theme::Theme, cx: &App) -> AnyElement {
+        let Some(reading) = &self.reading else {
+            return Self::empty_state(palette, cx, EmptyState::EmptyMailbox);
+        };
         div()
             .flex_1()
             .min_w_0()
@@ -318,11 +430,7 @@ impl Shell {
                     .py_5()
                     .border_b_1()
                     .border_color(style::color(palette.colors.border_hairline))
-                    .child(style::text(
-                        "Design review Thursday",
-                        TextRole::ReadingSubject,
-                        cx,
-                    ))
+                    .child(style::text(reading.subject.clone(), TextRole::ReadingSubject, cx))
                     .child(
                         div()
                             .flex()
@@ -338,67 +446,51 @@ impl Shell {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .child(style::text("PR", TextRole::MailboxPill, cx)),
+                                    .child(style::text(initials(&reading.from), TextRole::MailboxPill, cx)),
                             )
                             .child(
                                 div()
                                     .flex()
                                     .flex_col()
                                     .child(style::text(
-                                        "Priya Raman",
+                                        reading.from.clone(),
                                         TextRole::ReadingSenderName,
                                         cx,
                                     ))
                                     .child(style::text(
-                                        "to me · 9:14 AM",
+                                        reading.meta.clone(),
                                         TextRole::ReadingMeta,
                                         cx,
                                     )),
-                            )
-                            .child(div().flex_1())
-                            .child(Self::outlined_button(palette, cx, "Reply"))
-                            .child(Self::outlined_button(palette, cx, "Forward")),
+                            ),
                     ),
             )
             .child(
-                div().flex_1().min_h_0().px_6().py_5().child(style::text(
-                    "I moved the review to Thursday so the tokens are merged first. \
-                     Anything you want on the agenda?",
-                    TextRole::BodySerif,
-                    cx,
-                )),
+                div()
+                    .id("reading-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px_6()
+                    .py_5()
+                    .child(style::text(reading.body.clone(), TextRole::BodySerif, cx)),
             )
+            .into_any_element()
     }
 
-    fn outlined_button(
-        palette: &snail_ui::theme::Theme,
-        cx: &App,
-        label: &'static str,
-    ) -> impl IntoElement {
-        div()
-            .px_3()
-            .py_1()
-            .rounded(px(palette.radii.button))
-            .border_1()
-            .border_color(style::color(palette.colors.border_strong))
-            .hover(|s| s.border_color(style::color([0x00, 0x00, 0x00, 51])))
-            .child(style::text(label, TextRole::ButtonLabel, cx))
-    }
-
-    /// E1.10's states, drawn from `snail_ui::empty`.
     fn empty_state(
         palette: &snail_ui::theme::Theme,
         cx: &App,
         state: EmptyState,
-    ) -> impl IntoElement {
-        let copy = empty::copy(state);
+    ) -> AnyElement {
+        let copy = snail_ui::empty::copy(state);
         let glyph = match copy.icon {
-            IconHint::Envelope => Icon::Envelope,
-            IconHint::Search => Icon::Search,
-            IconHint::CloudOff => Icon::Overflow,
-            IconHint::Alert => Icon::Bell,
-            IconHint::Calendar => Icon::Calendar,
-            IconHint::Shield => Icon::Shield,
+            snail_ui::empty::IconHint::Envelope => Icon::Envelope,
+            snail_ui::empty::IconHint::Search => Icon::Search,
+            snail_ui::empty::IconHint::CloudOff => Icon::Overflow,
+            snail_ui::empty::IconHint::Alert => Icon::Bell,
+            snail_ui::empty::IconHint::Calendar => Icon::Calendar,
+            snail_ui::empty::IconHint::Shield => Icon::Shield,
         };
         div()
             .flex_1()
@@ -407,7 +499,6 @@ impl Shell {
             .items_center()
             .justify_center()
             .gap_2()
-            .bg(style::color(palette.colors.canvas))
             .child(
                 icon(glyph)
                     .w(px(28.0))
@@ -416,7 +507,16 @@ impl Shell {
             )
             .child(style::text(copy.title, TextRole::ListHeaderTitle, cx))
             .child(style::text(copy.body, TextRole::ReadingMeta, cx))
+            .into_any_element()
     }
+}
+
+fn initials(name: &str) -> String {
+    name.split_whitespace()
+        .filter_map(|word| word.chars().next())
+        .take(2)
+        .collect::<String>()
+        .to_uppercase()
 }
 
 impl Render for Shell {
@@ -450,36 +550,7 @@ impl Render for Shell {
             None
         };
 
-        // `SNAIL_EMPTY=mailbox|offline|…` shows one of the undesigned states for review (E1.10).
-        let demo_state = std::env::var("SNAIL_EMPTY").ok().and_then(|name| match name.as_str() {
-            "no-accounts" => Some(EmptyState::NoAccounts),
-            "first-sync" => Some(EmptyState::FirstSync),
-            "mailbox" => Some(EmptyState::EmptyMailbox),
-            "no-results" => Some(EmptyState::NoSearchResults),
-            "body-failed" => Some(EmptyState::BodyFailed),
-            "offline" => Some(EmptyState::Offline),
-            "sync-error" => Some(EmptyState::SyncError),
-            "calendar" => Some(EmptyState::EmptyCalendarRange),
-            _ => None,
-        });
-
-        let content = if let Some(state) = demo_state {
-            div()
-                .flex()
-                .flex_1()
-                .min_h_0()
-                .child(Self::empty_state(palette, cx, state))
-                .into_any_element()
-        } else {
-            div()
-                .flex()
-                .flex_1()
-                .min_h_0()
-                .child(Self::mail_list(palette, cx))
-                .child(Self::reading_pane(palette, cx))
-                .into_any_element()
-        };
-
+        let ids: Vec<i64> = self.rows.iter().map(|row| row.id).collect();
         div()
             .relative()
             .size_full()
@@ -488,9 +559,8 @@ impl Render for Shell {
             .bg(style::color(palette.colors.canvas))
             .text_color(style::color(palette.colors.ink))
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _window, cx| {
                 match event.keystroke.key.as_str() {
-                    // F2 toggles the dev overlay; F3 cycles System → Light → Dark (E1.12).
                     "f2" => this.overlay.toggle(),
                     "f3" => {
                         let next = match settings::pref(cx) {
@@ -499,6 +569,14 @@ impl Render for Shell {
                             ThemePref::Dark => ThemePref::System,
                         };
                         settings::set(next, cx);
+                    }
+                    "up" => {
+                        this.selection.move_by(-1, &ids);
+                        this.load_reading();
+                    }
+                    "down" => {
+                        this.selection.move_by(1, &ids);
+                        this.load_reading();
                     }
                     _ => return,
                 }
@@ -510,8 +588,9 @@ impl Render for Shell {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .child(Self::sidebar(palette, cx))
-                    .child(content),
+                    .child(self.sidebar(palette, cx))
+                    .child(self.list(palette, cx))
+                    .child(self.reading_pane(palette, cx)),
             )
             .when_some(overlay, |this, overlay| this.child(overlay))
     }

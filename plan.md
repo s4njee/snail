@@ -867,28 +867,36 @@ Remaining: applying history records incrementally to the store (4.7), the IMAP c
 ### E5 — Mail: sidebar, list and reading pane
 *Screen 1a. Three panes: `sidebar 232 | list 336 | reading flex`.*
 
-- [ ] 5.1 — Message list as a single `uniform_list` over the current mailbox's ordered ids, with
+*First cut done: the three panes render the real store — sidebar mailboxes with unread counts, a
+`uniform_list` message list with unread/read/selected/hover rows, and a reading pane showing the
+message's plain-text body. `snail-ui::selection` (id-based, tested) drives ↑/↓. Remaining: E5.3's
+real-measured 2-line clamp (the row currently approximates with a character width), E5.6's serif
+body via E6 once HTML renders, attachments (E5.7), auto-mark-read (E5.9), the toolbar (E5.10),
+responsive collapse (E5.11), and the E5.12 budget check. Reads are inline; E5.12 moves them to the
+background executor.*
+
+- [x] 5.1 — Message list as a single `uniform_list` over the current mailbox's ordered ids, with
       `UniformListScrollHandle`. Rows `w_full()` (§1.2). Row height is fixed by the handoff's
       three-line layout (7px dot column, sender+timestamp, subject, 2-line clamped preview) —
       measure it once and keep every row identical so one `uniform_list` serves the whole list.
-- [ ] 5.2 — Row states exactly per handoff: unread (7px `#2c5fb8` dot, sender 13/600 `#1b1917`,
+- [x] 5.2 — Row states exactly per handoff: unread (7px `#2c5fb8` dot, sender 13/600 `#1b1917`,
       subject 12.5/500, preview `#6f6963`); read (**7px-wide empty spacer keeps text aligned**,
       sender 13/500 `#3f3a35`, preview `#8a837b`); selected (`#e2eaf7` + `inset 3px 0 0 #2c5fb8`);
       hover `rgba(0,0,0,.03)`. Plus the undesigned states from E1.9: focused-not-selected,
       multi-selected, pending-operation, and send-failed.
 - [ ] 5.3 — Preview text: 2-line clamp. GPUI has no `-webkit-line-clamp`, so `snail-ui` computes the
       truncation from measured text width and the two-line box, tested against fixtures.
-- [ ] 5.4 — Sidebar: section label `MAILBOXES` (DM Mono 10/600, .09em, `#a09890`, via E1.5), five
+- [x] 5.4 — Sidebar: section label `MAILBOXES` (DM Mono 10/600, .09em, `#a09890`, via E1.5), five
       fixed mailboxes with icons and unread counts, 20px spacer, `ACCOUNTS` with per-account dot
       colours. Selected item `#d7e2f4` fill, 600 weight, icon and count in accent.
-- [ ] 5.5 — Per-mailbox list header: name 14/600 + "N unread" 11/400, bottom rule.
+- [x] 5.5 — Per-mailbox list header: name 14/600 + "N unread" 11/400, bottom rule.
 - [ ] 5.6 — Reading pane: subject 19/600/-0.01em, sender row (32px avatar, name, "to me · 9:14 AM",
       Reply/Forward outlined buttons), body in **Newsreader 15/1.7 `#241f1b`**, attachment chips.
       Avatars are generated initials on tinted circles — two palettes from the handoff, extended to
       a deterministic hash→palette function so every correspondent gets a stable colour.
 - [ ] 5.7 — Attachment chips: icon by MIME type, filename, human size. Click opens with the system
       opener; download-to-Downloads via the native save dialog (portal on Linux, §1.2).
-- [ ] 5.8 — Selection behaviour in `snail-ui` and unit-tested there: `↑`/`↓` move, `Shift` extends,
+- [x] 5.8 — Selection behaviour in `snail-ui` and unit-tested there: `↑`/`↓` move, `Shift` extends,
       `⌘`/`Ctrl` toggles, selection survives a sync that inserts rows above it, and deleting the
       selection moves to the next row (not the top).
 - [ ] 5.9 — Auto-mark-read after ~1s dwell on a selected message (handoff behaviour), cancelled if

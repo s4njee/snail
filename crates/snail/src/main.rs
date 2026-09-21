@@ -16,6 +16,7 @@ use std::sync::Arc;
 mod dev_overlay;
 mod frame_stats;
 mod icons;
+mod mail_model;
 mod rss;
 mod settings;
 mod shell;
@@ -36,6 +37,15 @@ fn main() {
 
     let theme_pref = settings::load(&paths);
     let settings_store = snail_core::settings::SettingsStore::new(&paths);
+
+    // One store, opened before the window. A failure falls back to in-memory so the UI still opens.
+    let store = match Store::open(&paths) {
+        Ok(store) => Arc::new(store),
+        Err(error) => {
+            log::warn!("could not open the store ({error:#}); using an in-memory one");
+            Arc::new(Store::open_in_memory().expect("in-memory store"))
+        }
+    };
 
     // Benchmark and fixture modes never open a window (E0.9, E2.9, E17.1).
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -76,6 +86,7 @@ fn main() {
 
             settings::install(settings_store.clone(), theme_pref, cx);
             startup::mark("component_theme");
+            let mail = mail_model::MailModel::new(store.clone());
             let bounds = Bounds::centered(None, size(px(1240.), px(820.)), cx);
             cx.open_window(
                 WindowOptions {
@@ -99,7 +110,7 @@ fn main() {
                     startup::mark("window_opened");
                     // `Root` as the shell's parent so popovers, dialogs and context menus have
                     // somewhere to render (plan.md E1.1).
-                    let shell = cx.new(|cx| shell::Shell::new(window, cx));
+                    let shell = cx.new(|cx| shell::Shell::new(mail, window, cx));
                     startup::mark("shell_built");
                     let root = cx.new(|cx| Root::new(shell, window, cx));
                     startup::mark("root_built");

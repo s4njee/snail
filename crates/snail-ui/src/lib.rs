@@ -8,5 +8,7 @@ pub mod empty;
 pub mod html;
 pub mod layout;
 pub mod motion;
+pub mod preview;
+pub mod selection;
 pub mod text;
 pub mod theme;

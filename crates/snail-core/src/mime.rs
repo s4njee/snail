@@ -39,6 +39,8 @@ pub struct ParsedMessage {
     pub to: Vec<Recipient>,
     pub date: Option<i64>,
     pub preview: Option<String>,
+    /// The full plain-text view, for the reading pane until E6 renders HTML.
+    pub plain: Option<String>,
     pub body: Body,
     pub attachments: Vec<Attachment>,
 }
@@ -94,6 +96,7 @@ pub fn parse_raw(bytes: &[u8]) -> Result<ParsedMessage> {
         .map(|c| c.into_owned())
         .unwrap_or_default();
     let preview = Some(collapse(&preview_source, PREVIEW_CHARS)).filter(|p| !p.is_empty());
+    let plain = Some(preview_source).filter(|text| !text.trim().is_empty());
 
     let attachments = message
         .attachments()
@@ -122,6 +125,7 @@ pub fn parse_raw(bytes: &[u8]) -> Result<ParsedMessage> {
         to,
         date: message.date().map(|date| date.to_timestamp()),
         preview,
+        plain,
         body,
         attachments,
     })
