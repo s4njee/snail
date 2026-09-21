@@ -208,22 +208,39 @@ one newsletter with 274 remote URLs exercise E6.2/E6.8.
 Worst offenders by unsupported constructs: `receipt-2` (43), `quoted-chain-2`/`receipt-1` (27,
 67 tables each at depth 9), the two calendar invites (15).
 
-**E6.13b — `TextView::html`:** gpui-kit 0.6.4 ships it (`component::text::TextView::html(id, text)`,
-`.selectable()`, `.scrollable()`, `.table_actions()`, `.on_link_click()`). `spikes/e0.3` renders the
-sanitized corpus through it (`cargo run --features gui --bin e0-3-render`). It builds, opens and
-renders; **readability verdict pending the owner's eyeball pass** over the 24 documents.
+**E6.13b — `TextView::html`: present, but NOT a shortcut to the reading pane.**
+gpui-kit 0.6.4 ships it (`component::text::TextView::html(id, text)`, `.selectable()`,
+`.scrollable()`, `.table_actions()`, `.on_link_click()`), and it renders the corpus — but the owner
+reports **“they render but there is no formatting.”** Reading `gpui-base`'s
+`text/format/html.rs` explains why:
+
+- It is a **Markdown-grade HTML subset**. It recognizes text/headings/lists/`br`/`hr`/`pre`/`code`,
+  `b`/`strong`/`i`/`em`/`u`, `a`, `img`, `blockquote`, `mark`, and `table`/`thead`/`tbody`/`td`/`th`.
+- From an inline `style` attribute it honors **only `color`, `background-color`, `width`,
+  `height`**. There is no `font-family`, `font-size`, `font-weight` (outside the tag form),
+  `text-align`, `margin`, `padding`, `border`, `line-height`, `display` or `vertical-align`.
+- `<style>` and `<script>` blocks are dropped outright.
+
+So it cannot meet E6.4's subset, which is exactly what real mail uses. **E6 still needs its own
+layout (6.5–6.7).** `TextView` stays valuable as **6.13's always-renders-something fallback**, and
+may be enough for simple messages, but it is not the reading pane.
+
+A second, independent cause: **ammonia's default strips the `style` attribute and `<style>`
+content**, so a sanitize-then-TextView pipeline loses even the `color`/`width` that `TextView` could
+have shown. E6.2/E6.3 must parse the supported style subset *before* (or instead of) ammonia's
+default attribute handling.
+
+To separate the two layers, `e0-3-render --raw` renders the original `.eml` bodies unsanitized.
 
 **Finding while rendering:** `TextView::html` does **not** block remote content — it tried to fetch
 remote images itself (`Failed to load asset ... "http://pixel.watch/..."`, `No HttpClient
 available`) for the newsletters that carry tracking pixels and hosted images. Nothing was fetched
 (no HTTP client is installed), but this proves E6.2's rule is load-bearing: **remote URLs must be
 rewritten to a blocked placeholder before the HTML reaches any renderer**, including `TextView`.
-Relying on the renderer to be inert would leak opens (and here, it just errors). `cid:` images will
-likewise need resolving to cache files before render.
 
-**Go/no-go:** not yet decided. Parse/sanitize pass; readability and the 16 ms screenful await the
-render pass. If `TextView::html` reads most of the corpus, E6 gets dramatically cheaper and it
-becomes E6.13's fallback renderer regardless.
+**Go/no-go:** not yet decided. Parse/sanitize pass comfortably. Readability does **not** pass with
+`TextView::html`, which makes E6.5–E6.7 necessary rather than optional — a scope confirmation, not a
+failure of the spike.
 
 ---
 

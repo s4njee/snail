@@ -887,6 +887,11 @@ E0.3 spike's failure taxonomy. All of it lives in `snail-core` (parse/sanitize) 
       `<object>`, `<form>`, every `on*` handler, and `javascript:`/`data:` URLs. **All remote URLs
       are rewritten to a blocked placeholder by default** — this is architecture, not a setting
       (§1.4). A per-sender "always load images" allowance is stored locally.
+      **E0.3 note:** ammonia's default *strips the `style` attribute and `<style>` content*, so the
+      CSS subset 6.3/6.4 needs must be extracted **before** (or with a filtered
+      `filter_style_properties`) ammonia's pass — otherwise the pipeline loses the formatting it is
+      about to implement. Also, `TextView::html` fetches remote images on its own, so URL rewriting
+      must happen before the document reaches any renderer.
 - [ ] 6.3 — Parse the sanitized document with `html5ever` into our own simplified DOM — elements,
       text, and the computed subset of style. Not a general CSSOM: resolve `style=""`, the
       supported properties from `<style>` blocks, and the legacy presentational attributes email
@@ -927,10 +932,15 @@ E0.3 spike's failure taxonomy. All of it lives in `snail-core` (parse/sanitize) 
       support covers a useful fraction of the E0.3 corpus, it is either a shortcut to a working
       reading pane or, at minimum, the fallback renderer for 6.13. Nobody should write a layout
       engine without first checking what the component library already does.
-      **Confirmed present at 0.6.4 (E0.3, 2026-09-21):** `component::text::TextView::html(id,
-      text)` with `.selectable()`, `.scrollable()`, `.table_actions()`, `.on_link_click()`. The
-      E0.3 corpus renders table-heavy mail (23/24 use tables, up to 13 deep), so its table handling
-      is the thing to judge before committing to E6.5–E6.7.
+      **Answered by E0.3 (2026-09-21): it is not a shortcut, but it is not wasted.** `TextView::html`
+      exists at 0.6.4 (`component::text::TextView::html(id, text)`, `.selectable()`,
+      `.scrollable()`, `.table_actions()`, `.on_link_click()`), but it is a Markdown-grade subset:
+      it honors only `color`, `background-color`, `width`, `height` from an inline `style`, has no
+      font-family/size/weight (outside tags), alignment, margin, padding, border or line-height, and
+      drops `<style>` blocks. Microsoft-grade mail therefore renders unformatted.
+      **Conclusion: E6.5–E6.7 are required, not optional; use `TextView` as 6.13's always-renders
+      fallback.** Also note it fetches remote images itself, so 6.2's URL rewriting is mandatory
+      *before* any renderer.
 - [ ] 6.14 — Corpus test: render the full E0.3 corpus plus everything added since, snapshot the box
       trees, and fail CI on an unexplained diff. This is the regression net for the whole epic.
 
