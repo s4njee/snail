@@ -61,6 +61,12 @@ struct UndoBar {
     at: Instant,
 }
 
+/// The "move to mailbox" picker (E8.4): the candidate mailboxes and the highlighted one.
+struct MovePicker {
+    mailboxes: Vec<(i64, String)>,
+    selected: usize,
+}
+
 pub struct Shell {
     focus: FocusHandle,
     overlay: DevOverlay,
@@ -83,6 +89,8 @@ pub struct Shell {
     undo: Option<UndoBar>,
     /// "Group messages by thread" (E8.3).
     group_threads: bool,
+    /// The open "move to mailbox" picker, if any (E8.4).
+    move_picker: Option<MovePicker>,
     /// Set when the user clicks "Load images" for the current message (E6.2), independent of the
     /// global switch and the per-sender allowance.
     forced_message: Option<i64>,
@@ -130,6 +138,7 @@ impl Shell {
             inline_open: false,
             undo: None,
             group_threads: true,
+            move_picker: None,
             forced_message: None,
             html_width: None,
             html_relayout: None,
@@ -149,6 +158,17 @@ impl Shell {
 
     /// Read mailboxes and the selected mailbox's page. Local and fast; E5.12 moves it off-thread.
     fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // If the provider rejected a triage op, put the row back and say so (E8.4).
+        let rolled_back = self.mail.rollback_failed_triage();
+        if rolled_back > 0 {
+            self.undo = Some(UndoBar {
+                ops: Vec::new(),
+                label: format!(
+                    "{rolled_back} change(s) couldn't be applied and were rolled back"
+                ),
+                at: Instant::now(),
+            });
+        }
         self.mailboxes = self.mail.mailboxes();
         if self.selected_mailbox >= self.mailboxes.len() {
             self.selected_mailbox = 0;
@@ -974,6 +994,64 @@ impl Shell {
         cx.notify();
     }
 
+    /// Open the move picker over the mailboxes other than the one being read (E8.4).
+    fn open_move_picker(&mut self, cx: &mut Context<Self>) {
+        let current = self
+            .mailboxes
+            .get(self.selected_mailbox)
+            .map(|mailbox| mailbox.id);
+        let mailboxes: Vec<(i64, String)> = self
+            .mailboxes
+            .iter()
+            .filter(|mailbox| Some(mailbox.id) != current)
+            .map(|mailbox| (mailbox.id, mailbox.name.clone()))
+            .collect();
+        if mailboxes.is_empty() {
+            return;
+        }
+        self.move_picker = Some(MovePicker {
+            mailboxes,
+            selected: 0,
+        });
+        cx.notify();
+    }
+
+    fn move_picker_step(&mut self, delta: isize) {
+        if let Some(picker) = self.move_picker.as_mut() {
+            let count = picker.mailboxes.len() as isize;
+            if count > 0 {
+                picker.selected = (picker.selected as isize + delta).rem_euclid(count) as usize;
+            }
+        }
+    }
+
+    /// Move the whole selection to the chosen mailbox, with one undo (E8.4/E8.7).
+    fn commit_move(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(picker) = self.move_picker.take() else {
+            return;
+        };
+        let Some((_, name)) = picker.mailboxes.get(picker.selected).cloned() else {
+            return;
+        };
+        let label = format!("Moved to {name}");
+        self.triage_selection(
+            snail_core::triage::TriageAction::Move { mailbox: name },
+            &label,
+            window,
+            cx,
+        );
+    }
+
+    /// Highlight a clicked picker row and commit it (E8.4).
+    fn select_move_target(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(picker) = self.move_picker.as_mut() {
+            if let Some(index) = picker.mailboxes.iter().position(|(mailbox, _)| *mailbox == id) {
+                picker.selected = index;
+            }
+        }
+        self.commit_move(window, cx);
+    }
+
     fn undo_last(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(bar) = self.undo.take() {
             for op in bar.ops {
@@ -1609,11 +1687,56 @@ impl Render for Shell {
         };
 
         let ids: Vec<i64> = self.rows.iter().map(|row| row.id).collect();
-        let undo_label = self
+        let undo = self
             .undo
             .as_ref()
             .filter(|bar| bar.at.elapsed() < Duration::from_secs(6))
-            .map(|bar| bar.label.clone());
+            .map(|bar| (bar.label.clone(), !bar.ops.is_empty()));
+        // The "move to mailbox" picker, floating above the undo bar (E8.4).
+        let move_picker = self.move_picker.as_ref().map(|picker| {
+            let mut card = div()
+                .id("move-picker")
+                .w(px(260.0))
+                .max_h(px(380.0))
+                .overflow_y_scroll()
+                .rounded(px(palette.radii.card))
+                .border_1()
+                .border_color(style::color(palette.colors.border))
+                .bg(style::color(palette.colors.card))
+                .p_2()
+                .flex()
+                .flex_col()
+                .gap_1();
+            for (index, (id, name)) in picker.mailboxes.iter().enumerate() {
+                let id = *id;
+                let name = name.clone();
+                let highlighted = index == picker.selected;
+                card = card.child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .rounded(px(palette.radii.button))
+                        .when(highlighted, |this| {
+                            this.bg(style::color(palette.colors.accent_tint))
+                        })
+                        .child(style::text(name, TextRole::SidebarItem, cx))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _event, window, cx| {
+                                this.select_move_target(id, window, cx);
+                            }),
+                        ),
+                );
+            }
+            div()
+                .absolute()
+                .bottom(px(56.0))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(card)
+        });
         div()
             .relative()
             .size_full()
@@ -1624,6 +1747,18 @@ impl Render for Shell {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 let modifiers = event.keystroke.modifiers;
+                // The move picker owns the keyboard while it is open (E8.4).
+                if this.move_picker.is_some() {
+                    match event.keystroke.key.as_str() {
+                        "escape" => this.move_picker = None,
+                        "up" => this.move_picker_step(-1),
+                        "down" => this.move_picker_step(1),
+                        "enter" => this.commit_move(window, cx),
+                        _ => {}
+                    }
+                    cx.notify();
+                    return;
+                }
                 match event.keystroke.key.as_str() {
                     "f2" => this.overlay.toggle(),
                     "f3" => {
@@ -1671,6 +1806,8 @@ impl Render for Shell {
                     ),
                     "e" => this.archive_thread(window, cx),
                     "u" => this.toggle_read(window, cx),
+                    // Move the selection to another mailbox (E8.4).
+                    "m" => this.open_move_picker(cx),
                     "g" => {
                         this.group_threads = !this.group_threads;
                         this.reload(window, cx);
@@ -1690,7 +1827,7 @@ impl Render for Shell {
                     .child(self.reading_pane(palette, cx)),
             )
             .when_some(overlay, |this, overlay| this.child(overlay))
-            .when_some(undo_label, |this, label| {
+            .when_some(undo, |this, (label, has_ops)| {
                 this.child(
                     div()
                         .absolute()
@@ -1711,19 +1848,22 @@ impl Render for Shell {
                                 .text_color(style::color(palette.colors.canvas))
                                 .text_size(px(12.0))
                                 .child(label)
-                                .child(
-                                    div()
-                                        .text_color(style::color(palette.colors.accent))
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|this, _, window, cx| {
-                                                this.undo_last(window, cx)
-                                            }),
-                                        )
-                                        .child("Undo"),
-                                ),
+                                .when(has_ops, |this| {
+                                    this.child(
+                                        div()
+                                            .text_color(style::color(palette.colors.accent))
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this, _, window, cx| {
+                                                    this.undo_last(window, cx)
+                                                }),
+                                            )
+                                            .child("Undo"),
+                                    )
+                                }),
                         ),
                 )
             })
+            .when_some(move_picker, |this, picker| this.child(picker))
     }
 }

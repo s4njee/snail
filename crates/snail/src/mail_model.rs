@@ -79,6 +79,11 @@ impl MailModel {
         self.store.undo_triage(op_id, now_epoch()).unwrap_or(false)
     }
 
+    /// Put back any triage op the provider rejected (E8.4); returns how many were rolled back.
+    pub fn rollback_failed_triage(&self) -> usize {
+        self.store.rollback_failed_triage(now_epoch()).unwrap_or(0)
+    }
+
     pub fn thread_id_of(&self, message_id: i64) -> Option<i64> {
         self.store.thread_id_of(message_id).ok().flatten()
     }

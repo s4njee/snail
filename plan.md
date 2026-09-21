@@ -1067,23 +1067,23 @@ dispatches for real (7.12). Outstanding: iCloud's SMTP send — the other half o
 - [x] 8.3 — "Group messages by thread" setting genuinely off: the list shows individual messages.
       Both paths must be equally fast — this is a store query shape, not a UI filter. *(Done:
       `Store::page` vs `Store::thread_page`, one `group_threads` toggle (`g`).)*
-- [ ] 8.4 — Triage actions — archive, trash, mark read/unread, move — applied optimistically to the
-      store and UI, enqueued in `pending_op`, with a visible rollback on failure. *(Partial:
-      archive, trash and read/unread are wired to keys and `Store::apply_triage` writes the row and
-      the `pending_op` in one transaction. `Move` exists in the core but has no picker in the UI
-      yet, and the rollback is the undo bar plus the sidebar footer's failed count rather than
-      per-row chrome.)*
+- [x] 8.4 — Triage actions — archive, trash, mark read/unread, move — applied optimistically to the
+      store and UI, enqueued in `pending_op`, with a visible rollback on failure. *(Done:
+      `⌘⇧A` archive, `⌘⌫` trash, `u` read/unread and `m` open the move picker; `Store::apply_triage`
+      writes the row and the `pending_op` in one transaction. A triage op the provider rejects is
+      rolled back by `Store::rollback_failed_triage` on the next reload, and the undo bar says so;
+      the move picker covers the whole selection with one undo (E8.7).)*
 - [x] 8.5 — Undo affordance per handoff: a transient bar after archive/trash with a real inverse
       operation (not just a UI restore — it must undo the queued remote op too, or issue the
       inverse if it already ran). *(Done: `Store::undo_triage` restores the row and either cancels a
       still-pending op or queues its inverse; a six-second bar carries the Undo.)*
-- [ ] 8.6 — Gmail labels vs IMAP folders reconciled into one `label` concept: Gmail's many labels
+- [x] 8.6 — Gmail labels vs IMAP folders reconciled into one `label` concept: Gmail's many labels
       per message and iCloud's one folder per message both project onto the handoff's five fixed
       mailboxes plus an account-specific remainder. The mapping table is the interesting part —
-      Gmail's archive is "remove INBOX", iCloud's is "move to Archive". *(Partial:
-      `snail-core::labels` states the concept, the table and `archive_operation`, with tests
-      asserting both providers reach the same five; the providers still use their own
-      `mailbox_kind_for_labels`/`map_folder`, which the module documents rather than replaces.)*
+      Gmail's archive is "remove INBOX", iCloud's is "move to Archive". *(Done: `snail-core::labels`
+      is the single home — `MailboxKind`, the iCloud folder rules and `gmail_primary_kind` live
+      there, `providers::imap` re-exports them, and `gmail::mailbox_kind_for_labels` delegates. Tests
+      assert both providers reach the same five, and `archive_operation` names the asymmetry.)*
 - [x] 8.7 — Bulk actions over a multi-selection, with one undo covering the batch. *(Done: the
       triage action runs over `Selection::selected_ids` and every queued op goes into one undo bar.)*
 - [x] 8.8 — Conversation-level actions (archive whole thread) distinct from message-level. *(Done:

@@ -524,35 +524,7 @@ impl Store {
             let Some(message_id) = target_id else {
                 return Ok(false);
             };
-            let account_id: i64 = tx.query_row(
-                "SELECT account_id FROM message WHERE id = ?1",
-                [message_id],
-                |row| row.get(0),
-            )?;
-
-            if let Some(name) = &payload.previous_mailbox {
-                tx.execute(
-                    "INSERT OR IGNORE INTO mailbox (account_id, name, kind) VALUES (?1, ?2, ?3)",
-                    params![account_id, name, kind_for_name(name)],
-                )?;
-                let mailbox_id: i64 = tx.query_row(
-                    "SELECT id FROM mailbox WHERE account_id = ?1 AND name = ?2",
-                    params![account_id, name],
-                    |row| row.get(0),
-                )?;
-                tx.execute(
-                    "UPDATE message SET mailbox_id = ?2 WHERE id = ?1",
-                    params![message_id, mailbox_id],
-                )?;
-            }
-            tx.execute(
-                "UPDATE message SET unread = ?2, starred = ?3 WHERE id = ?1",
-                params![
-                    message_id,
-                    payload.previous_unread as i64,
-                    payload.previous_flagged as i64
-                ],
-            )?;
+            let account_id = restore_triage_row(tx, message_id, &payload)?;
 
             let inverse = payload
                 .action
@@ -593,6 +565,48 @@ impl Store {
                 return Ok(true);
             }
             Ok(false)
+        })
+    }
+
+    /// Roll back triage ops the provider rejected (failed or dead-lettered): put each row back
+    /// where it was and mark the op `rolled_back` so it is neither retried nor double-applied.
+    /// Returns how many were rolled back, for the visible "couldn't apply" notice (E8.4).
+    pub fn rollback_failed_triage(&self, now: i64) -> Result<usize> {
+        use crate::triage::TriagePayload;
+        self.transaction(|tx| {
+            let rows = {
+                let mut statement = tx.prepare(
+                    "SELECT id, payload_json, target_id FROM pending_op
+                     WHERE state IN ('failed', 'dead')
+                       AND operation IN ('archive', 'trash', 'mark_read', 'mark_flagged', 'move')",
+                )?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            };
+            let mut rolled_back = 0;
+            for (id, payload_json, target_id) in rows {
+                let Some(payload) = payload_json.as_deref().and_then(TriagePayload::from_json) else {
+                    continue;
+                };
+                let Some(message_id) = target_id else {
+                    continue;
+                };
+                restore_triage_row(tx, message_id, &payload)?;
+                tx.execute(
+                    "UPDATE pending_op SET state = 'rolled_back', updated_at = ?2 WHERE id = ?1",
+                    params![id, now],
+                )?;
+                rolled_back += 1;
+            }
+            Ok(rolled_back)
         })
     }
 
@@ -1202,6 +1216,44 @@ impl Store {
     }
 }
 
+/// Put a message back where a triage payload says it was, and return its account id (E8.4/E8.5).
+/// Shared by undo and by the rollback of an op the provider rejected.
+fn restore_triage_row(
+    tx: &rusqlite::Transaction,
+    message_id: i64,
+    payload: &crate::triage::TriagePayload,
+) -> Result<i64> {
+    let account_id: i64 = tx.query_row(
+        "SELECT account_id FROM message WHERE id = ?1",
+        [message_id],
+        |row| row.get(0),
+    )?;
+    if let Some(name) = &payload.previous_mailbox {
+        tx.execute(
+            "INSERT OR IGNORE INTO mailbox (account_id, name, kind) VALUES (?1, ?2, ?3)",
+            params![account_id, name, kind_for_name(name)],
+        )?;
+        let mailbox_id: i64 = tx.query_row(
+            "SELECT id FROM mailbox WHERE account_id = ?1 AND name = ?2",
+            params![account_id, name],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "UPDATE message SET mailbox_id = ?2 WHERE id = ?1",
+            params![message_id, mailbox_id],
+        )?;
+    }
+    tx.execute(
+        "UPDATE message SET unread = ?2, starred = ?3 WHERE id = ?1",
+        params![
+            message_id,
+            payload.previous_unread as i64,
+            payload.previous_flagged as i64
+        ],
+    )?;
+    Ok(account_id)
+}
+
 fn kind_for_name(name: &str) -> &'static str {
     match name.to_ascii_lowercase().as_str() {
         "inbox" => "inbox",
@@ -1585,6 +1637,41 @@ mod tests {
         assert!(page.iter().any(|row| row.newest_id == threaded));
         // The threadless message is not dropped from the grouped list.
         assert!(page.iter().any(|row| row.newest_id == solo));
+    }
+
+    #[test]
+    fn a_failed_triage_op_rolls_back_to_where_it_was() {
+        use crate::triage::TriageAction;
+        let store = store_with_account();
+        let inbox = store.ensure_mailbox(1, "Inbox", "inbox").unwrap();
+        let message = store
+            .insert_message(&NewMessage {
+                account_id: 1,
+                mailbox_id: Some(inbox),
+                provider: Some(ProviderRef::Gmail {
+                    id: "g1".into(),
+                    thread_id: None,
+                    history_id: None,
+                }),
+                subject: Some("x".into()),
+                unread: true,
+                ..Default::default()
+            })
+            .unwrap();
+        let op = store
+            .apply_triage(message, &TriageAction::Archive, "archive:rb", 0)
+            .unwrap();
+        // The provider rejected it.
+        store.set_op_state(op, "failed", Some("quota"), 1).unwrap();
+
+        assert_eq!(store.rollback_failed_triage(2).unwrap(), 1);
+        assert_eq!(store.page(inbox, 10, 0).unwrap().len(), 1, "back in Inbox");
+        assert!(
+            store.pending_ops(10).unwrap().is_empty(),
+            "a rolled-back op is not retried"
+        );
+        // Rolling back again is a no-op.
+        assert_eq!(store.rollback_failed_triage(3).unwrap(), 0);
     }
 
     #[test]

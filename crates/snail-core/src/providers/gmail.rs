@@ -5,7 +5,7 @@
 
 use serde_json::Value;
 
-use super::imap::MailboxKind;
+use crate::labels::MailboxKind;
 
 /// Google silently disables compression without the literal string `gzip` in the User-Agent (E4.9).
 pub const USER_AGENT: &str = "snail/0.1 (gzip) (gmail)";
@@ -353,22 +353,10 @@ pub fn parse_message_meta(json: &Value) -> MessageMeta {
 }
 
 /// Gmail's labels → the handoff's five mailboxes (E8.6). Archive is the interesting one: it is
-/// "none of the system folders" rather than a label of its own.
+/// "none of the system folders" rather than a label of its own. The rule lives in
+/// [`crate::labels::gmail_primary_kind`] now, next to iCloud's, so both agree by construction.
 pub fn mailbox_kind_for_labels(labels: &[String]) -> MailboxKind {
-    let has = |name: &str| labels.iter().any(|label| label.eq_ignore_ascii_case(name));
-    if has("TRASH") {
-        MailboxKind::Trash
-    } else if has("SPAM") {
-        MailboxKind::Other
-    } else if has("DRAFT") {
-        MailboxKind::Drafts
-    } else if has("SENT") {
-        MailboxKind::Sent
-    } else if has("INBOX") {
-        MailboxKind::Inbox
-    } else {
-        MailboxKind::Archive
-    }
+    crate::labels::gmail_primary_kind(labels)
 }
 
 /// Gmail's `raw` field: standard base64url, occasionally padded.
