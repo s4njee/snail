@@ -497,10 +497,11 @@ Every story that touches the network is checked with the network off.
 its own workspace so the app's lockfile is untouched, and each writes its result into
 `spikes/RESULTS.md` the way Ferrite's G0 did.*
 
-- [ ] 0.1 — Workspace scaffold: `snail-core`, `snail-ui`, `snail-services`, `snail` (bin), resolver
+- [x] 0.1 — Workspace scaffold: `snail-core`, `snail-ui`, `snail-services`, `snail` (bin), resolver
       2, `[profile.dev.package."*"] opt-level = 2`. Opens an empty window on macOS with the pinned
       gpui-kit family, `.with_assets(gpui_kit::assets::Assets)`, and
-      `window_decorations: Some(WindowDecorations::Client)`.
+      `window_decorations: Some(WindowDecorations::Client)`. *(Done; gpui-kit 0.6.4 / gpui-pre
+      0.3.5, see `spikes/RESULTS.md` E0.1.)*
 - [ ] 0.2 — **Spike: gpui-kit `Input`/`Textarea` under real load.** The biggest single dependency
       risk in the plan (§1.1). Build a throwaway compose window: To/Cc/Subject inputs, a multi-line
       body `Textarea`, tab order between them, IME (test with a CJK input method on all three
@@ -509,20 +510,20 @@ its own workspace so the app's lockfile is untouched, and each writes its result
       surface actually is at 0.6.1. **Go/no-go:** if `Textarea` cannot carry a compose body, the
       fallback is writing one text-input element against GPUI's `text_system` directly, which is
       three weeks of work and must be known now, not in E7.
-- [ ] 0.3 — **Spike: the HTML renderer's hardest real input.** Take 20 messages from the owner's
+- [x] 0.3 — **Spike: the HTML renderer's hardest real input.** Take 20 messages from the owner's
       actual inbox — deliberately weighted to the worst: a nested-table marketing newsletter, a
       GitHub notification, a Google Calendar invite, a quoted-reply chain five levels deep, an
       `apple-mail`-generated reply, a plain-text message with format=flowed, and one with inline
       `cid:` images. Sanitize, lay out, and render them. **Go/no-go:** all 20 must be *readable*
       (not pixel-perfect) and lay out in under 16 ms for a screenful. Output the failure taxonomy
       — it is E6's backlog.
-- [ ] 0.4 — **Spike: both accounts authenticate and pull one page.** A CLI that runs the Google
+- [x] 0.4 — **Spike: both accounts authenticate and pull one page.** A CLI that runs the Google
       loopback OAuth+PKCE flow, and separately connects to iCloud IMAP with an app-specific
       password from the keychain, and prints 50 message headers from each. Plus one Google Calendar
       page and one iCloud CalDAV report. **Go/no-go:** proves the auth story end to end before any
       UI exists, and pins down the scope list Google actually grants. *(Details in E3/E4/E12; see
       the protocol notes in §6.)*
-- [ ] 0.5 — App identity and paths: bundle id `dev.snail.app`, config/cache/log dirs via `dirs`,
+- [x] 0.5 — App identity and paths: bundle id `dev.snail.app`, config/cache/log dirs via `dirs`,
       `SNAIL_CONFIG_DIR` / `SNAIL_CACHE_DIR` overrides, rotating log file. Cache is separate from
       config so the mail store is never iCloud-backed-up.
 - [ ] 0.6 — Google Cloud project configured as an **unverified app published to production**, not
@@ -544,7 +545,7 @@ its own workspace so the app's lockfile is untouched, and each writes its result
       **Fallback if production-unverified is refused for restricted scopes:** iCloud-style IMAP
       against Gmail using an app password — which Google also gates behind 2FA and may withdraw —
       or accept the weekly re-auth. Know which before E3 is built.
-- [ ] 0.7 — Startup timeline instrumentation: `startup::mark("gpui_init" | "fonts" | "services" |
+- [x] 0.7 — Startup timeline instrumentation: `startup::mark("gpui_init" | "fonts" | "services" |
       "models" | "window_opened" | "shell_built" | "first_frame")`. Cheap enough to leave on
       permanently; it is how a 60 ms blocking read gets found.
 - [ ] 0.8 — Dev overlay: frame p50/p99 from gpui-kit's `profiler` feature, visible row count, last

@@ -255,9 +255,11 @@ splitting layout into a GPUI-free crate, demonstrated on day one.
 Still approximate: `colspan`/`rowspan`, deeply nested tables, real font metrics, and `<style>`/
 `class` resolution (E6.3) are not done.
 
-**Go/no-go:** not yet decided. Parse/sanitize pass comfortably. Readability does **not** pass with
-`TextView::html`, which makes E6.5–E6.7 necessary rather than optional — a scope confirmation, not a
-failure of the spike.
+**Verdict (owner, 2026-09-21): PASS — "it's very messy but I think we can work with it."**
+The structural gate is met: our own layout makes table-based mail legible where `TextView` could
+not, and the messy parts are known, bounded next steps (real fonts, `<style>`/`class` resolution
+E6.3, `colspan`/nested tables E6.6, images), not unknowns. `TextView::html` is kept for 6.13's
+fallback. Parse + sanitize stay cheap across the whole corpus.
 
 ---
 
