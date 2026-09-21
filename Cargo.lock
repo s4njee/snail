@@ -6437,6 +6437,7 @@ dependencies = [
  "gpui-kit",
  "gpui-pre",
  "gpui-pre-platform",
+ "libc",
  "log",
  "serde",
  "serde_json",

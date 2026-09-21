@@ -5,6 +5,9 @@ use gpui_kit::*;
 
 use snail_core::paths::Paths;
 
+mod dev_overlay;
+mod frame_stats;
+mod rss;
 mod shell;
 mod startup;
 

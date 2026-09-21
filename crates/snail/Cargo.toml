@@ -29,3 +29,7 @@ default = ["profiler"]
 # GPUI's per-frame draw and present timings, read by the dev overlay (plan.md E0.8). Only costs
 # anything while tracing is switched on.
 profiler = ["gpui-kit/profiler"]
+
+# RSS sampling for the dev overlay (E0.8).
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"

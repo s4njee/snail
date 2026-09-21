@@ -548,8 +548,9 @@ its own workspace so the app's lockfile is untouched, and each writes its result
 - [x] 0.7 — Startup timeline instrumentation: `startup::mark("gpui_init" | "fonts" | "services" |
       "models" | "window_opened" | "shell_built" | "first_frame")`. Cheap enough to leave on
       permanently; it is how a 60 ms blocking read gets found.
-- [ ] 0.8 — Dev overlay: frame p50/p99 from gpui-kit's `profiler` feature, visible row count, last
-      sync duration, store size, RSS. Every later budget is read off this.
+- [x] 0.8 — Dev overlay: frame p50/p99 from gpui-kit's `profiler` feature, visible row count, last
+      sync duration, store size, RSS. Every later budget is read off this. *(Done; `SNAIL_OVERLAY=1`
+      or F2. Row/store/sync are placeholders until E2/E4.)*
 - [ ] 0.9 — Fixture generator: a synthetic store with 200k messages across 8 mailboxes and 20k
       events, plus a `--fixture` mode that points the app at it. All list and search benchmarks run
       against this, never against the real mailbox.
@@ -559,7 +560,10 @@ its own workspace so the app's lockfile is untouched, and each writes its result
       `cargo test --workspace`. Ubuntu runner needs the Vulkan and portal packages listed in
       BUILDING.md.
 - [ ] 0.11 — Test hardware available: a Linux machine **with a working Vulkan driver** (§1.2 — this
-      is not optional) and a Windows machine. Both with a checkout that builds.
+      is not optional) and a Windows machine. Both with a checkout that builds. *(The Pi 5 at
+      `neo.local` builds `cargo build --workspace` in 30m50s, verified 2026-09-21, with V3D hardware
+      Vulkan; it has no display attached, so the GUI/IME pass is deferred by the owner. Windows
+      still pending.)*
 
 ### E1 — App shell, window chrome and the design system
 

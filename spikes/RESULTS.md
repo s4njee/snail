@@ -263,6 +263,12 @@ fallback. Parse + sanitize stay cheap across the whole corpus.
 
 ---
 
-## E0.4 — both accounts authenticate and pull one page
+## E0.8 — dev overlay
 
-_pending — credentials are a hard input (see the E0 ask list)_
+**PASS (macOS).** `snail::frame_stats::FrameWindow` (fixed ring, nearest-rank percentiles, 2 tests),
+`snail::rss` (macOS `proc_pidinfo`/`getrusage`/`proc_pid_rusage`, Linux `/proc/self/status`, 2
+tests) and `snail::dev_overlay::DevOverlay`. Shown from launch with `SNAIL_OVERLAY=1` or toggled
+with **F2**; it draws frame-interval p50/p99, GPUI's draw/present p50/p99 (the `profiler` feature's
+`FrameTimingCollector`), RSS now/peak, and the startup summary — rows/store/last-sync are
+placeholders until E2/E4. Only while visible does the shell schedule a notify per frame, so a closed
+overlay costs nothing (idle-CPU budget, §4). Smoke-tested: `first_frame @ 629 ms` in a debug build.
