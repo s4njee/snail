@@ -4,7 +4,9 @@
 //! rules, calendar grid geometry, date formatting, and HTML layout (plan.md §2). Only deps are
 //! `serde`/`serde_json`.
 
+pub mod empty;
 pub mod html;
 pub mod layout;
+pub mod motion;
 pub mod text;
 pub mod theme;

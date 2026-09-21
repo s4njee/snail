@@ -191,30 +191,31 @@ rules keep it from becoming a second design system:
    elevation — `desk < chrome < sunken < canvas < card`. That ranking is *identical* in a dark
    theme (more elevated still means lighter), so the same token names keep the same meaning and
    only their values move into a dark range. Nothing in any view has to know which theme is active.
-2. **It stays warm.** The whole point of `#faf8f5` is paper. A cool grey or pure-black dark theme
-   would be a different product. Dark Snail is ink on warm dark stock — hue stays in the same
-   30–40° family at low chroma, and there is no pure black or pure white anywhere.
+2. **It is neutral dark grey, not warm.** *(Owner, 2026-09-21, overriding the earlier "stays warm"
+   rule.)* A brown-tinted dark ground read wrong. Dark Snail is a neutral near-black/dark-grey
+   ground with neutral greys for text; the identity lives in the accent and the calendar colours,
+   not the ground. There is no pure white anywhere, and the ground may go as dark as black.
 
 **Surfaces** (same rank order as light, compressed into a dark range):
 
 | Token | Light | Dark | Used by |
 |---|---|---|---|
-| desk | `#e8e4dc` | `#100e0c` | behind the window |
-| chrome | `#f2efe9` | `#191614` | titlebar, sidebar, attachment chip |
-| sunken | `#f6f3ee` | `#1e1b18` | collapsed thread rows, format bar, agenda zebra, weekday strip |
-| canvas | `#faf8f5` | `#232019` | message list, reading pane, calendar panes |
-| card | `#ffffff` | `#2a2622` | settings cards, inline reply box, month cells, popovers |
+| desk | `#e8e4dc` | `#0a0a0a` | behind the window |
+| chrome | `#f2efe9` | `#1a1a1a` | titlebar, sidebar, attachment chip |
+| sunken | `#f6f3ee` | `#1e1e1e` | collapsed thread rows, format bar, agenda zebra, weekday strip |
+| canvas | `#faf8f5` | `#121212` | message list, reading pane, calendar panes |
+| card | `#ffffff` | `#262626` | settings cards, inline reply box, month cells, popovers |
 
 **Text** — warm off-whites, never `#ffffff`:
 
 | Token | Light | Dark |
 |---|---|---|
-| ink | `#1b1917` | `#f0ece6` |
-| body serif ink | `#241f1b` | `#e8e2da` |
-| secondary | `#3f3a35` | `#cec7bd` |
-| muted | `#6f6963` | `#a49c92` |
-| soft | `#8a837b` | `#8a8279` |
-| faint | `#a09890` | `#6f6862` |
+| ink | `#1b1917` | `#f2f2f2` |
+| body serif ink | `#241f1b` | `#e6e6e6` |
+| secondary | `#3f3a35` | `#c8c8c8` |
+| muted | `#6f6963` | `#a3a3a3` |
+| soft | `#8a837b` | `#8a8a8a` |
+| faint | `#a09890` | `#6e6e6e` |
 
 Note `soft` barely moves: it is already a mid grey and reads correctly against both grounds.
 
@@ -234,7 +235,7 @@ Note `soft` barely moves: it is already a mid grey and reads correctly against b
 white-on-dark hairlines read fainter than black-on-light at the same alpha. The search field's
 `rgba(0,0,0,.045)` fill becomes `rgba(255,255,255,.05)`.
 
-**Odds and ends:** toggle-off track `#ddd8d0` → `#3a3530`; compose caret pipe `#c9c2b9` → `#5e574f`;
+**Odds and ends:** toggle-off track `#ddd8d0` → `#2e2e2e`; compose caret pipe `#c9c2b9` → `#4d4d4d`;
 secondary account dot `#7a8f6d` → `#93a884`. Traffic lights are system colours and do not change.
 
 **Calendar colours lift too.** These were picked for white and go muddy on dark, so each gets a

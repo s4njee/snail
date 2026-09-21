@@ -119,18 +119,19 @@ pub const LIGHT: Colors = Colors {
 };
 
 pub const DARK: Colors = Colors {
-    desk: [0x10, 0x0e, 0x0c, 0xff],
-    chrome: [0x19, 0x16, 0x14, 0xff],
-    sunken: [0x1e, 0x1b, 0x18, 0xff],
-    canvas: [0x23, 0x20, 0x19, 0xff],
-    card: [0x2a, 0x26, 0x22, 0xff],
+    // Owner, 2026-09-21: a neutral dark-grey ground, not the warm brown §1.3b originally proposed.
+    desk: [0x0a, 0x0a, 0x0a, 0xff],
+    chrome: [0x1a, 0x1a, 0x1a, 0xff],
+    sunken: [0x1e, 0x1e, 0x1e, 0xff],
+    canvas: [0x12, 0x12, 0x12, 0xff],
+    card: [0x26, 0x26, 0x26, 0xff],
 
-    ink: [0xf0, 0xec, 0xe6, 0xff],
-    body_ink: [0xe8, 0xe2, 0xda, 0xff],
-    secondary: [0xce, 0xc7, 0xbd, 0xff],
-    muted: [0xa4, 0x9c, 0x92, 0xff],
-    soft: [0x8a, 0x82, 0x79, 0xff],
-    faint: [0x6f, 0x68, 0x62, 0xff],
+    ink: [0xf2, 0xf2, 0xf2, 0xff],
+    body_ink: [0xe6, 0xe6, 0xe6, 0xff],
+    secondary: [0xc8, 0xc8, 0xc8, 0xff],
+    muted: [0xa3, 0xa3, 0xa3, 0xff],
+    soft: [0x8a, 0x8a, 0x8a, 0xff],
+    faint: [0x6e, 0x6e, 0x6e, 0xff],
 
     accent: [0x5b, 0x8e, 0xe0, 0xff],
     accent_hover: [0x7a, 0xa5, 0xe8, 0xff],
@@ -144,8 +145,8 @@ pub const DARK: Colors = Colors {
     border_strong: [0xff, 0xff, 0xff, 36],
     search_fill: [0xff, 0xff, 0xff, 13],
 
-    toggle_off: [0x3a, 0x35, 0x30, 0xff],
-    caret: [0x5e, 0x57, 0x4f, 0xff],
+    toggle_off: [0x2e, 0x2e, 0x2e, 0xff],
+    caret: [0x4d, 0x4d, 0x4d, 0xff],
     account_dot_secondary: [0x93, 0xa8, 0x84, 0xff],
 
     classes: [0xe2, 0x72, 0x3f, 0xff],
@@ -378,16 +379,22 @@ mod tests {
     }
 
     #[test]
-    fn surfaces_rank_by_elevation_in_both_themes() {
-        for theme in [&LIGHT_THEME, &DARK_THEME] {
-            let c = &theme.colors;
-            // desk is the darkest in light and the darkest-extreme in dark; card the most elevated.
-            let rank = |color: Color| luminance(color);
-            assert!(rank(c.desk) < rank(c.chrome), "{:?}", theme.mode);
-            assert!(rank(c.chrome) < rank(c.canvas), "{:?}", theme.mode);
-            assert!(rank(c.sunken) < rank(c.canvas), "{:?}", theme.mode);
-            assert!(rank(c.canvas) < rank(c.card), "{:?}", theme.mode);
-        }
+    fn surfaces_are_ordered_for_their_theme() {
+        // Light: the window ground sits between the chrome and the elevated card.
+        let light = &LIGHT_THEME.colors;
+        assert!(luminance(light.desk) < luminance(light.chrome));
+        assert!(luminance(light.chrome) < luminance(light.canvas));
+        assert!(luminance(light.sunken) < luminance(light.canvas));
+        assert!(luminance(light.canvas) < luminance(light.card));
+
+        // Dark: a neutral dark-grey ground, with desk below it and chrome/sunken/card above
+        // (owner, 2026-09-21).
+        let dark = &DARK_THEME.colors;
+        assert!(luminance(dark.canvas) < 0.02, "dark canvas should be near-black");
+        assert!(luminance(dark.desk) < luminance(dark.canvas));
+        assert!(luminance(dark.canvas) < luminance(dark.chrome));
+        assert!(luminance(dark.chrome) < luminance(dark.sunken));
+        assert!(luminance(dark.sunken) < luminance(dark.card));
     }
 
     #[test]
