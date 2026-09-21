@@ -122,9 +122,18 @@ impl Shell {
             let _ = cx;
             div()
                 .flex()
-                .child(button("–", WindowControlArea::Min).on_click(|_, window, _| window.minimize_window()))
-                .child(button("□", WindowControlArea::Max).on_click(|_, window, _| window.zoom_window()))
-                .child(button("×", WindowControlArea::Close).on_click(|_, window, _| window.remove_window()))
+                .child(
+                    button("–", WindowControlArea::Min)
+                        .on_mouse_down(MouseButton::Left, |_, window, _| window.minimize_window()),
+                )
+                .child(
+                    button("□", WindowControlArea::Max)
+                        .on_mouse_down(MouseButton::Left, |_, window, _| window.zoom_window()),
+                )
+                .child(
+                    button("×", WindowControlArea::Close)
+                        .on_mouse_down(MouseButton::Left, |_, window, _| window.remove_window()),
+                )
                 .into_any_element()
         }
     }
