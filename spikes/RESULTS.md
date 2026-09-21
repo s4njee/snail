@@ -238,6 +238,14 @@ available`) for the newsletters that carry tracking pixels and hosted images. No
 (no HTTP client is installed), but this proves E6.2's rule is load-bearing: **remote URLs must be
 rewritten to a blocked placeholder before the HTML reaches any renderer**, including `TextView`.
 
+**Prototype (E6.5 seed): a minimal layout in `snail-ui`.** `crates/snail-ui/src/html.rs` (DOM +
+style subset + `resolve_style`) and `crates/snail-ui/src/layout.rs` (block stacking, greedy inline
+wrapping with alignment, table columns with padding/borders) produce a flat display list from a
+`TextMeasure` trait. 9 unit tests run against a fake metrics impl, with no GPUI. The GPUI bin
+`e0-3-layout` parses MIME → sanitizes (keeping the supported `style` subset) → html5ever →
+`snail-ui` DOM → layout → fragments. This is the seed of E6.5/E6.6, not the finished renderer:
+`colspan`/nested tables, real font metrics and images are still approximate.
+
 **Go/no-go:** not yet decided. Parse/sanitize pass comfortably. Readability does **not** pass with
 `TextView::html`, which makes E6.5–E6.7 necessary rather than optional — a scope confirmation, not a
 failure of the spike.

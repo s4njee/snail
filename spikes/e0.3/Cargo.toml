@@ -13,6 +13,9 @@ publish = false
 [dependencies]
 mail-parser = "0.11"
 ammonia = "4"
+snail-ui = { path = "../../crates/snail-ui" }
+html5ever = "0.27"
+markup5ever_rcdom = "0.3"
 gpui-kit = { version = "=0.6.4", default-features = true, optional = true }
 gpui-pre = { version = "=0.3.5", optional = true }
 gpui-pre-platform = "=0.3.5"
@@ -29,6 +32,11 @@ path = "src/bin/analyze.rs"
 [[bin]]
 name = "e0-3-render"
 path = "src/bin/render.rs"
+required-features = ["gui"]
+
+[[bin]]
+name = "e0-3-layout"
+path = "src/bin/layout.rs"
 required-features = ["gui"]
 
 [profile.dev.package."*"]
