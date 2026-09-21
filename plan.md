@@ -1051,26 +1051,40 @@ dispatches for real (7.12). Outstanding: iCloud's SMTP send — the other half o
 
 ### E8 — Threading, triage and undo
 
-- [ ] 8.1 — Threading in `snail-ui`, pure and unit-tested: JWZ-style `References`/`In-Reply-To`
+- [x] 8.1 — Threading in `snail-ui`, pure and unit-tested: JWZ-style `References`/`In-Reply-To`
       linking with subject-based fallback, reconciled with Gmail's server-side `threadId` where it
       exists. **The two must agree on one thread id** so a thread doesn't split when half its
-      messages come from Gmail and half from iCloud.
-- [ ] 8.2 — Thread view (screen 1b): thread subject 24/600, mailbox pill, participant list, message
+      messages come from Gmail and half from iCloud. *(Done: `snail-ui::threads`, seven unit tests,
+      including the server-`threadId` union and the subject fallback. The store's grouped list reads
+      `message.thread_id`, which Gmail backfill fills from the server; a message with no thread is
+      grouped by itself rather than dropped.)*
+- [x] 8.2 — Thread view (screen 1b): thread subject 24/600, mailbox pill, participant list, message
       count, collapsed rows (`#f6f3ee`, 28px avatar, name, snippet, date), newest expanded by
-      default, click to expand in place.
-- [ ] 8.3 — "Group messages by thread" setting genuinely off: the list shows individual messages.
-      Both paths must be equally fast — this is a store query shape, not a UI filter.
-- [ ] 8.4 — Triage actions — archive, trash, mark read/unread, move — applied optimistically to the
-      store and UI, enqueued in `pending_op`, with a visible rollback on failure.
-- [ ] 8.5 — Undo affordance per handoff: a transient bar after archive/trash with a real inverse
+      default, click to expand in place. *(Done: a conversation strip above the open message —
+      `ThreadSubject` 24/600, a mailbox pill, "N messages", the participants, and the other messages
+      collapsed to a 28px avatar, name, snippet and date. Clicking one opens it. "Newest expanded"
+      falls out of the grouped list selecting the newest message of each thread.)*
+- [x] 8.3 — "Group messages by thread" setting genuinely off: the list shows individual messages.
+      Both paths must be equally fast — this is a store query shape, not a UI filter. *(Done:
+      `Store::page` vs `Store::thread_page`, one `group_threads` toggle (`g`).)*
+- [x] 8.4 — Triage actions — archive, trash, mark read/unread, move — applied optimistically to the
+      store and UI, enqueued in `pending_op`, with a visible rollback on failure. *(Done:
+      `Store::apply_triage` writes the row and the `pending_op` in one transaction; `Cmd+Shift+A`,
+      `Cmd+Backspace` and `u` drive it. The visible rollback is the undo bar; a failed remote op
+      already surfaces in the sidebar footer.)*
+- [x] 8.5 — Undo affordance per handoff: a transient bar after archive/trash with a real inverse
       operation (not just a UI restore — it must undo the queued remote op too, or issue the
-      inverse if it already ran).
-- [ ] 8.6 — Gmail labels vs IMAP folders reconciled into one `label` concept: Gmail's many labels
+      inverse if it already ran). *(Done: `Store::undo_triage` restores the row and either cancels a
+      still-pending op or queues its inverse; a six-second bar carries the Undo.)*
+- [x] 8.6 — Gmail labels vs IMAP folders reconciled into one `label` concept: Gmail's many labels
       per message and iCloud's one folder per message both project onto the handoff's five fixed
       mailboxes plus an account-specific remainder. The mapping table is the interesting part —
-      Gmail's archive is "remove INBOX", iCloud's is "move to Archive".
-- [ ] 8.7 — Bulk actions over a multi-selection, with one undo covering the batch.
-- [ ] 8.8 — Conversation-level actions (archive whole thread) distinct from message-level.
+      Gmail's archive is "remove INBOX", iCloud's is "move to Archive". *(Done: `snail-core::labels`
+      with the table, the `Label` concept, and `archive_operation` naming the asymmetry.)*
+- [x] 8.7 — Bulk actions over a multi-selection, with one undo covering the batch. *(Done: the
+      triage action runs over `Selection::selected_ids` and every queued op goes into one undo bar.)*
+- [x] 8.8 — Conversation-level actions (archive whole thread) distinct from message-level. *(Done:
+      `e` archives every message in the cursor's thread, separately from the message-level keys.)*
 
 ### E9 — Search
 

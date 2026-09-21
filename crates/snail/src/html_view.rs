@@ -7,13 +7,16 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use snail_core::html::{HtmlNode as CoreNode, SanitizedDocument};
-use snail_ui::html::{Element, FontSpec, Node, Style, apply_inline_style, resolve_style};
+use snail_ui::html::{
+    DEFAULT_FONT_FAMILY, Element, FontSpec, Node, Style, apply_inline_style, font_stack,
+    resolve_style,
+};
 use snail_ui::layout::{self, Fragment, TextMeasure};
 
 /// A decoded inline image, with the size it should occupy.
@@ -119,6 +122,11 @@ impl HtmlView {
     pub fn selection(&self) -> gpui_kit::base::TextSelectionHandle {
         self.selection.clone()
     }
+
+    /// The width this view was laid out at, so a relayout can be skipped when it is unchanged.
+    pub fn width(&self) -> f32 {
+        self.width
+    }
 }
 
 /// Sanitize, parse and lay out `html` at `width`, measuring text with the window's text system.
@@ -131,7 +139,8 @@ pub fn layout_document(
     show_quotes: bool,
     cx: &mut App,
 ) -> Result<HtmlView, layout::LayoutError> {
-    let dom = parse_to_dom(document, images, show_quotes);
+    let mut dom = parse_to_dom(document, images, show_quotes);
+    resolve_font_families(&mut dom, window.text_system());
     let measure = GpuiMeasure {
         text_system: window.text_system(),
     };
@@ -147,6 +156,56 @@ pub fn layout_document(
         height: result.height,
         selection,
     })
+}
+
+/// Replace every element's font stack with the first family this machine actually has.
+///
+/// Measurement and painting both read the resolved name, so they cannot disagree about which
+/// face a word is set in. Resolving here, rather than handing GPUI the stack, matters because
+/// GPUI only uses a `Font`'s `fallbacks` for missing *glyphs*: a missing *family* drops straight
+/// to GPUI's own fallback stack, which starts with a monospace face. A stack with nothing
+/// installed becomes `None`, which both sides treat as [`DEFAULT_FONT_FAMILY`].
+fn resolve_font_families(nodes: &mut [Node], text_system: &WindowTextSystem) {
+    for node in nodes {
+        if let Node::Element(element) = node {
+            if let Some(stack) = element.style.font_family.take() {
+                element.style.font_family = first_installed(&stack, text_system);
+            }
+            resolve_font_families(&mut element.children, text_system);
+        }
+    }
+}
+
+/// The first installed family in a normalized stack, cached per stack: a newsletter repeats
+/// the same few stacks on hundreds of elements.
+fn first_installed(stack: &str, text_system: &WindowTextSystem) -> Option<String> {
+    static RESOLVED: LazyLock<Mutex<HashMap<String, Option<String>>>> =
+        LazyLock::new(Mutex::default);
+    let lock = || {
+        RESOLVED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    };
+    if let Some(resolved) = lock().get(stack) {
+        return resolved.clone();
+    }
+    let resolved = font_stack(stack)
+        .find(|family| family_installed(family, text_system))
+        .map(str::to_string);
+    lock().insert(stack.to_string(), resolved.clone());
+    resolved
+}
+
+/// Whether the platform has `family`. GPUI's `font_id`, which would report a missing family,
+/// is private; `resolve_font` instead substitutes GPUI's fallback face. So a family is installed
+/// when it resolves to something other than that fallback — or when it *is* the fallback.
+fn family_installed(family: &str, text_system: &WindowTextSystem) -> bool {
+    let fallback = text_system.resolve_font(&font("\u{1}snail: no such family"));
+    let id = text_system.resolve_font(&font(family.to_string()));
+    id != fallback
+        || text_system
+            .get_font_for_id(fallback)
+            .is_some_and(|face| face.family.eq_ignore_ascii_case(family))
 }
 
 pub fn has_quoted_content(document: &SanitizedDocument) -> bool {
@@ -204,8 +263,6 @@ pub fn paint(
         )
         .into_any_element()
 }
-
-const DEFAULT_IMAGE: (f32, f32) = (240.0, 140.0);
 
 fn fragment_intersects(fragment: &Fragment, min_y: f32, max_y: f32) -> bool {
     let (top, bottom) = match fragment {
@@ -266,7 +323,10 @@ fn paint_fragment(
             } else {
                 FontWeight::NORMAL
             };
-            let family = font.family.clone().unwrap_or_else(|| "Helvetica".into());
+            let family = font
+                .family
+                .clone()
+                .unwrap_or_else(|| DEFAULT_FONT_FAMILY.into());
             if let Some(href) = href {
                 let target = href.clone();
                 let tooltip = target.clone();
@@ -308,7 +368,10 @@ fn paint_fragment(
         }
         Fragment::Image { rect, src } => match images.resolve(src) {
             // A real inline image (E6.8).
+            // `Fill` is HTML's default `object-fit`. GPUI's own default is `Contain`, which
+            // shrank the picture to fit inside any box whose aspect ratio differed.
             Some(placed) => img(ImageSource::Render(placed.render.clone()))
+                .object_fit(ObjectFit::Fill)
                 .absolute()
                 .left(px(rect.x))
                 .top(px(rect.y))
@@ -462,16 +525,13 @@ fn build_children(
                     style.padding_left = padding;
                 }
 
-                // Reserve an inline image's real size so unblocking never reflows (E6.8) — but only
-                // when the message did not specify one.
-                if tag == "img" && (style.width.is_none() || style.height.is_none()) {
-                    let (width, height) = map
-                        .get("src")
-                        .filter(|src| !src.starts_with(snail_core::html::REMOTE_TOKEN_PREFIX))
-                        .and_then(|src| images.size(src))
-                        .unwrap_or(DEFAULT_IMAGE);
-                    style.width = style.width.or(Some(width));
-                    style.height = style.height.or(Some(height));
+                // Hand the layout engine the image's *natural* size, kept separate from the
+                // sender's specified width/height (E6.8). Layout completes a single specified
+                // dimension from the natural aspect ratio, as a browser does. Remote images are
+                // keyed by their `snail-remote:` token and resolve once fetched; a blocked one
+                // stays unknown and layout reserves its placeholder box.
+                if tag == "img" {
+                    style.natural_size = map.get("src").and_then(|src| images.size(src));
                 }
 
                 let mut children = Vec::new();
@@ -961,7 +1021,12 @@ mod tests {
 impl TextMeasure for GpuiMeasure<'_> {
     fn width(&self, text: &str, font: &FontSpec) -> f32 {
         let gpu_font = Font {
-            family: font.family.as_deref().unwrap_or("Helvetica").into(),
+            family: font
+                .family
+                .as_deref()
+                .unwrap_or(DEFAULT_FONT_FAMILY)
+                .to_string()
+                .into(),
             weight: if font.bold {
                 FontWeight::BOLD
             } else {

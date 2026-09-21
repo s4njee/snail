@@ -88,7 +88,22 @@ pub struct Style {
     /// Legacy table attributes, retained because production email still relies on them.
     pub cell_padding: f32,
     pub cell_spacing: f32,
+    /// A replaced element's natural (decoded) pixel size, when known. Distinct from
+    /// `width`/`height`, which are what the *sender specified*: sizing an `<img>` needs both,
+    /// because a single specified dimension is completed from the natural aspect ratio.
+    /// Not inherited.
+    pub natural_size: Option<(f32, f32)>,
+    /// The parent's computed font size, which `em` and `%` font sizes resolve against (where
+    /// every other `em` resolves against the element's own size). Set by inheritance.
+    pub parent_font_size: f32,
 }
+
+/// WebKit's `medium`, and so the size of any email text that never sets one.
+pub const DEFAULT_FONT_SIZE: f32 = 16.0;
+
+/// The family used when a message names none, or none of the families it names is installed.
+/// Measurement and painting must both fall back to this, or text overflows its measured box.
+pub const DEFAULT_FONT_FAMILY: &str = "Helvetica";
 
 impl Default for Style {
     fn default() -> Self {
@@ -98,7 +113,7 @@ impl Default for Style {
             background: None,
             background_image: None,
             font_family: None,
-            font_size: 15.0,
+            font_size: DEFAULT_FONT_SIZE,
             bold: false,
             italic: false,
             underline: false,
@@ -129,6 +144,8 @@ impl Default for Style {
             rowspan: 1,
             cell_padding: 0.0,
             cell_spacing: 0.0,
+            natural_size: None,
+            parent_font_size: DEFAULT_FONT_SIZE,
         }
     }
 }
@@ -163,6 +180,7 @@ fn inherit(parent: &Style) -> Style {
         color: parent.color,
         font_family: parent.font_family.clone(),
         font_size: parent.font_size,
+        parent_font_size: parent.font_size,
         bold: parent.bold,
         italic: parent.italic,
         underline: parent.underline,
@@ -184,12 +202,19 @@ pub fn resolve_style(tag: &str, attrs: &HashMap<String, String>, parent: &Style)
         "div" | "p" | "section" | "article" | "header" | "footer" => {
             style.display = Display::Block;
         }
-        "h1" => style.font_size = 32.0,
-        "h2" => style.font_size = 24.0,
-        "h3" => style.font_size = 19.0,
-        "h4" => style.font_size = 17.0,
-        "h5" => style.font_size = 15.0,
-        "h6" => style.font_size = 14.0,
+        // WebKit's user-agent sizes, relative to the inherited size, and bold.
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+            let factor = match tag.as_str() {
+                "h1" => 2.0,
+                "h2" => 1.5,
+                "h3" => 1.17,
+                "h4" => 1.0,
+                "h5" => 0.83,
+                _ => 0.67,
+            };
+            style.font_size = parent.font_size * factor;
+            style.bold = true;
+        }
         "b" | "strong" => style.bold = true,
         "i" | "em" => style.italic = true,
         "u" => style.underline = true,
@@ -199,8 +224,17 @@ pub fn resolve_style(tag: &str, attrs: &HashMap<String, String>, parent: &Style)
             style.underline = true;
         }
         "center" => style.align = Align::Center,
-        "span" | "font" | "small" | "big" | "sub" | "sup" | "label" => {
+        "span" | "font" | "sub" | "sup" | "label" => {
             style.display = Display::Inline;
+        }
+        // `font-size: smaller` / `larger` in WebKit's user-agent stylesheet.
+        "small" | "big" => {
+            style.display = Display::Inline;
+            style.font_size = if tag == "small" {
+                parent.font_size / 1.2
+            } else {
+                parent.font_size * 1.2
+            };
         }
         "ul" => style.list_style = ListStyle::Disc,
         "ol" => style.list_style = ListStyle::Decimal,
@@ -221,7 +255,11 @@ pub fn resolve_style(tag: &str, attrs: &HashMap<String, String>, parent: &Style)
             set_padding(&mut style, [10.0; 4]);
             style.background = Some([0xf6, 0xf3, 0xee, 0xff]);
         }
-        "pre" | "code" => style.font_size = 13.0,
+        // `font-family: monospace`, which WebKit sets at its 13px default fixed size.
+        "pre" | "code" | "kbd" | "samp" | "tt" => {
+            style.font_family = parse_font_stack("monospace");
+            style.font_size = 13.0;
+        }
         _ => {}
     }
 
@@ -253,21 +291,15 @@ pub fn resolve_style(tag: &str, attrs: &HashMap<String, String>, parent: &Style)
     {
         style.border = border;
     }
-    if let Some(size) = attrs.get("size").and_then(|v| v.trim().parse::<f32>().ok()) {
-        // <font size="1..7">, the legacy scale.
-        style.font_size = match size as i32 {
-            1 => 10.0,
-            2 => 12.0,
-            3 => 15.0,
-            4 => 18.0,
-            5 => 22.0,
-            6 => 26.0,
-            7 => 32.0,
-            _ => style.font_size,
-        };
+    // `<font size>` only: other elements' `size` attributes (`<hr size>`, `<input size>`) are not
+    // font sizes.
+    if matches!(tag.as_str(), "font" | "basefont")
+        && let Some(size) = attrs.get("size").and_then(|value| legacy_font_size(value))
+    {
+        style.font_size = size;
     }
     if let Some(face) = attrs.get("face") {
-        style.font_family = parse_font_family(face);
+        style.font_family = parse_font_stack(face);
     }
     if let Some(span) = attrs
         .get("colspan")
@@ -299,165 +331,184 @@ pub fn resolve_style(tag: &str, attrs: &HashMap<String, String>, parent: &Style)
 }
 
 /// The `style=""` subset. Unknown properties are dropped, never approximated (E6.4).
+///
+/// Font size is applied first whatever order the declarations are written in, because every
+/// other `em` length resolves against the element's own computed font size (CSS computes
+/// `font-size` before the properties that depend on it).
 pub fn apply_inline_style(style: &mut Style, css: &str) {
-    for declaration in css.split(';') {
-        let Some((name, value)) = declaration.split_once(':') else {
-            continue;
-        };
-        let name = name.trim().to_ascii_lowercase();
-        let value = value.trim();
-        let lower = value.to_ascii_lowercase();
-        // Email generators append `!important` liberally, including to the properties that make
-        // class/inline precedence has already been decided before this function is called.
-        let value = lower
-            .strip_suffix("!important")
-            .map(|prefix| &value[..prefix.len()])
-            .unwrap_or(value)
-            .trim();
-        let lower = value.to_ascii_lowercase();
-        match name.as_str() {
-            "color" => {
-                if let Some(color) = parse_color(value) {
-                    style.color = color;
-                }
+    let declarations: Vec<(String, &str)> = css
+        .split(';')
+        .filter_map(|declaration| {
+            let (name, value) = declaration.split_once(':')?;
+            let value = value.trim();
+            // Email generators append `!important` liberally; class/inline precedence has
+            // already been decided before this function is called.
+            let lower = value.to_ascii_lowercase();
+            let value = lower
+                .strip_suffix("!important")
+                .map(|prefix| &value[..prefix.len()])
+                .unwrap_or(value)
+                .trim();
+            Some((name.trim().to_ascii_lowercase(), value))
+        })
+        .collect();
+    let sets_font_size = |name: &str| matches!(name, "font-size" | "font");
+    for (name, value) in declarations.iter().filter(|(name, _)| sets_font_size(name)) {
+        apply_declaration(style, name, value);
+    }
+    for (name, value) in declarations
+        .iter()
+        .filter(|(name, _)| !sets_font_size(name))
+    {
+        apply_declaration(style, name, value);
+    }
+}
+
+fn apply_declaration(style: &mut Style, name: &str, value: &str) {
+    let lower = value.to_ascii_lowercase();
+    let em = style.font_size;
+    match name {
+        "color" => {
+            if let Some(color) = parse_color(value) {
+                style.color = color;
             }
-            "background" | "background-color" => {
-                if let Some(url) = extract_url(value) {
-                    style.background_image = Some(url);
-                }
-                // The shorthand carries the colour among other tokens.
-                let color =
-                    parse_color(value).or_else(|| value.split_whitespace().find_map(parse_color));
-                if let Some(color) = color {
-                    style.background = Some(color);
-                }
+        }
+        "background" | "background-color" => {
+            if let Some(url) = extract_url(value) {
+                style.background_image = Some(url);
             }
-            "background-image" => {
-                if let Some(url) = extract_url(value) {
-                    style.background_image = Some(url);
-                }
+            // The shorthand carries the colour among other tokens.
+            let color =
+                parse_color(value).or_else(|| value.split_whitespace().find_map(parse_color));
+            if let Some(color) = color {
+                style.background = Some(color);
             }
-            "font-size" => {
-                if let Some(px) = parse_length(value) {
-                    style.font_size = px;
-                }
+        }
+        "background-image" => {
+            if let Some(url) = extract_url(value) {
+                style.background_image = Some(url);
             }
-            "font-family" => style.font_family = parse_font_family(value),
-            "font" => apply_font_shorthand(style, value),
-            "font-weight" => {
-                style.bold = matches!(lower.as_str(), "bold" | "600" | "700" | "800" | "900");
+        }
+        "font-size" => {
+            if let Some(px) = parse_font_size(value, style.parent_font_size) {
+                style.font_size = px;
             }
-            "font-style" => style.italic = lower == "italic",
-            "text-decoration" | "text-decoration-line" => {
-                style.underline = lower.contains("underline");
-            }
-            "text-align" => {
-                style.align = match lower.as_str() {
-                    "center" => Align::Center,
-                    "right" => Align::Right,
-                    _ => Align::Left,
-                };
-            }
-            "line-height" => style.line_height = parse_line_height(value, style.font_size),
-            "margin" => {
-                if value
-                    .split_whitespace()
-                    .any(|part| part.eq_ignore_ascii_case("auto"))
-                {
-                    style.margin_auto_horizontal = true;
-                }
-                let numeric = value
-                    .split_whitespace()
-                    .map(|part| {
-                        if part.eq_ignore_ascii_case("auto") {
-                            "0"
-                        } else {
-                            part
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                if let Some([top, _, bottom, _]) = parse_box_lengths(&numeric) {
-                    style.margin_top = top;
-                    style.margin_bottom = bottom;
-                }
-            }
-            "margin-top" => style.margin_top = parse_length(value).unwrap_or(0.0),
-            "margin-bottom" => style.margin_bottom = parse_length(value).unwrap_or(0.0),
-            "margin-left" | "margin-right" if lower == "auto" => {
+        }
+        "font-family" => style.font_family = parse_font_stack(value),
+        "font" => apply_font_shorthand(style, value),
+        "font-weight" => {
+            style.bold = matches!(lower.as_str(), "bold" | "600" | "700" | "800" | "900");
+        }
+        "font-style" => style.italic = lower == "italic",
+        "text-decoration" | "text-decoration-line" => {
+            style.underline = lower.contains("underline");
+        }
+        "text-align" => {
+            style.align = match lower.as_str() {
+                "center" => Align::Center,
+                "right" => Align::Right,
+                _ => Align::Left,
+            };
+        }
+        "line-height" => style.line_height = parse_line_height(value, style.font_size),
+        "margin" => {
+            if value
+                .split_whitespace()
+                .any(|part| part.eq_ignore_ascii_case("auto"))
+            {
                 style.margin_auto_horizontal = true;
             }
-            "padding" => {
-                if let Some(values) = parse_box_lengths(value) {
-                    set_padding(style, values);
-                }
-            }
-            "padding-top" => style.padding_top = parse_length(value).unwrap_or(0.0),
-            "padding-right" => style.padding_right = parse_length(value).unwrap_or(0.0),
-            "padding-bottom" => style.padding_bottom = parse_length(value).unwrap_or(0.0),
-            "padding-left" => style.padding_left = parse_length(value).unwrap_or(0.0),
-            "border" | "border-width" => {
-                let border = value
-                    .split_whitespace()
-                    .find_map(parse_length)
-                    .unwrap_or(0.0);
-                set_border(style, border);
-            }
-            "border-top" => style.border_top = parse_border_width(value),
-            "border-right" => style.border_right = parse_border_width(value),
-            "border-bottom" => style.border_bottom = parse_border_width(value),
-            "border-left" => style.border_left = parse_border_width(value),
-            "border-color" => {
-                if let Some(color) = parse_color(value) {
-                    style.border_color = color;
-                }
-            }
-            "width" => set_width(style, value),
-            "max-width" => set_max_width(style, value),
-            "height" => set_height(style, value),
-            "display" => {
-                let supported = match lower.as_str() {
-                    "block" => Some(Display::Block),
-                    "none" => Some(Display::None),
-                    "inline" => Some(Display::Inline),
-                    "inline-block" => Some(Display::InlineBlock),
-                    "table" => Some(Display::Table),
-                    "table-row-group" | "table-header-group" | "table-footer-group" => {
-                        Some(Display::TableRowGroup)
+            let numeric = value
+                .split_whitespace()
+                .map(|part| {
+                    if part.eq_ignore_ascii_case("auto") {
+                        "0"
+                    } else {
+                        part
                     }
-                    "table-row" => Some(Display::TableRow),
-                    "table-cell" => Some(Display::TableCell),
-                    _ => None,
-                };
-                if let Some(display) = supported {
-                    style.display = display;
-                }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            if let Some([top, _, bottom, _]) = parse_box_lengths(&numeric, em) {
+                style.margin_top = top;
+                style.margin_bottom = bottom;
             }
-            // Hidden preheaders often use visibility instead of display. Preserving that intent is
-            // important: their zero-width filler text can otherwise push the real mail thousands
-            // of lines below the viewport.
-            "visibility" if lower == "hidden" || lower == "collapse" => {
-                style.display = Display::None;
-            }
-            "vertical-align" => style.vertical_align = parse_vertical_align(value),
-            "list-style" | "list-style-type" => {
-                let supported = if lower.contains("decimal") {
-                    Some(ListStyle::Decimal)
-                } else if lower.contains("none") {
-                    Some(ListStyle::None)
-                } else if lower.contains("disc") {
-                    Some(ListStyle::Disc)
-                } else {
-                    None
-                };
-                if let Some(list_style) = supported {
-                    style.list_style = list_style;
-                }
-            }
-            // Deliberately unsupported: float, position, flex, grid, transform,
-            // media queries, pseudo-elements, web fonts (E6.4).
-            _ => {}
         }
+        "margin-top" => style.margin_top = parse_length_in(value, em).unwrap_or(0.0),
+        "margin-bottom" => style.margin_bottom = parse_length_in(value, em).unwrap_or(0.0),
+        "margin-left" | "margin-right" if lower == "auto" => {
+            style.margin_auto_horizontal = true;
+        }
+        "padding" => {
+            if let Some(values) = parse_box_lengths(value, em) {
+                set_padding(style, values);
+            }
+        }
+        "padding-top" => style.padding_top = parse_length_in(value, em).unwrap_or(0.0),
+        "padding-right" => style.padding_right = parse_length_in(value, em).unwrap_or(0.0),
+        "padding-bottom" => style.padding_bottom = parse_length_in(value, em).unwrap_or(0.0),
+        "padding-left" => style.padding_left = parse_length_in(value, em).unwrap_or(0.0),
+        "border" | "border-width" => {
+            let border = value
+                .split_whitespace()
+                .find_map(|part| parse_length_in(part, em))
+                .unwrap_or(0.0);
+            set_border(style, border);
+        }
+        "border-top" => style.border_top = parse_border_width(value, em),
+        "border-right" => style.border_right = parse_border_width(value, em),
+        "border-bottom" => style.border_bottom = parse_border_width(value, em),
+        "border-left" => style.border_left = parse_border_width(value, em),
+        "border-color" => {
+            if let Some(color) = parse_color(value) {
+                style.border_color = color;
+            }
+        }
+        "width" => set_width(style, value),
+        "max-width" => set_max_width(style, value),
+        "height" => set_height(style, value),
+        "display" => {
+            let supported = match lower.as_str() {
+                "block" => Some(Display::Block),
+                "none" => Some(Display::None),
+                "inline" => Some(Display::Inline),
+                "inline-block" => Some(Display::InlineBlock),
+                "table" => Some(Display::Table),
+                "table-row-group" | "table-header-group" | "table-footer-group" => {
+                    Some(Display::TableRowGroup)
+                }
+                "table-row" => Some(Display::TableRow),
+                "table-cell" => Some(Display::TableCell),
+                _ => None,
+            };
+            if let Some(display) = supported {
+                style.display = display;
+            }
+        }
+        // Hidden preheaders often use visibility instead of display. Preserving that intent is
+        // important: their zero-width filler text can otherwise push the real mail thousands
+        // of lines below the viewport.
+        "visibility" if lower == "hidden" || lower == "collapse" => {
+            style.display = Display::None;
+        }
+        "vertical-align" => style.vertical_align = parse_vertical_align(value),
+        "list-style" | "list-style-type" => {
+            let supported = if lower.contains("decimal") {
+                Some(ListStyle::Decimal)
+            } else if lower.contains("none") {
+                Some(ListStyle::None)
+            } else if lower.contains("disc") {
+                Some(ListStyle::Disc)
+            } else {
+                None
+            };
+            if let Some(list_style) = supported {
+                style.list_style = list_style;
+            }
+        }
+        // Deliberately unsupported: float, position, flex, grid, transform,
+        // media queries, pseudo-elements, web fonts (E6.4).
+        _ => {}
     }
 }
 
@@ -469,15 +520,17 @@ fn set_border(style: &mut Style, width: f32) {
     style.border_left = Some(width);
 }
 
-fn parse_border_width(value: &str) -> Option<f32> {
-    value.split_whitespace().find_map(parse_length)
+fn parse_border_width(value: &str, em: f32) -> Option<f32> {
+    value
+        .split_whitespace()
+        .find_map(|part| parse_length_in(part, em))
 }
 
 fn set_width(style: &mut Style, value: &str) {
     if let Some(percent) = parse_percentage(value) {
         style.width_percent = Some(percent);
         style.width = None;
-    } else if let Some(width) = parse_length(value) {
+    } else if let Some(width) = parse_length_in(value, style.font_size) {
         style.width = Some(width);
         style.width_percent = None;
     }
@@ -487,7 +540,7 @@ fn set_max_width(style: &mut Style, value: &str) {
     if let Some(percent) = parse_percentage(value) {
         style.max_width_percent = Some(percent);
         style.max_width = None;
-    } else if let Some(width) = parse_length(value) {
+    } else if let Some(width) = parse_length_in(value, style.font_size) {
         style.max_width = Some(width);
         style.max_width_percent = None;
     }
@@ -497,7 +550,7 @@ fn set_height(style: &mut Style, value: &str) {
     if let Some(percent) = parse_percentage(value) {
         style.height_percent = Some(percent);
         style.height = None;
-    } else if let Some(height) = parse_length(value) {
+    } else if let Some(height) = parse_length_in(value, style.font_size) {
         style.height = Some(height);
         style.height_percent = None;
     }
@@ -517,12 +570,69 @@ fn parse_vertical_align(value: &str) -> VerticalAlign {
     }
 }
 
-fn parse_font_family(value: &str) -> Option<String> {
-    value
+/// Parse a CSS `font-family` list into a normalized stack: every family kept in order, CSS
+/// generics and system aliases expanded to concrete families, duplicates dropped. The result is
+/// comma-separated (see [`font_stack`]); the platform picks the first family that is installed.
+///
+/// Keeping the whole stack matters: the ubiquitous `-apple-system, BlinkMacSystemFont, "Segoe
+/// UI", Roboto, Helvetica, Arial, sans-serif` names nothing a font system can find in its first
+/// two entries — CoreText matches none of `-apple-system`, `system-ui`, `BlinkMacSystemFont`,
+/// `serif` or `sans-serif` — so taking only the first family meant no family at all.
+pub fn parse_font_stack(value: &str) -> Option<String> {
+    let mut stack: Vec<String> = Vec::new();
+    let mut push = |family: &str| {
+        if !stack.iter().any(|known| known.eq_ignore_ascii_case(family)) {
+            stack.push(family.to_string());
+        }
+    };
+    for raw in value.split(',') {
+        let name = raw.trim().trim_matches(['\'', '"']).trim();
+        if name.is_empty() {
+            continue;
+        }
+        match expand_family(name) {
+            Some(families) => families.iter().for_each(|family| push(family)),
+            None => push(name),
+        }
+    }
+    (!stack.is_empty()).then(|| stack.join(", "))
+}
+
+/// The concrete families a CSS generic or system alias stands for, in preference order across
+/// macOS, Windows and Linux. `Some(&[])` drops a generic with no sensible email mapping.
+fn expand_family(name: &str) -> Option<&'static [&'static str]> {
+    match name.to_ascii_lowercase().as_str() {
+        "-apple-system" | "system-ui" | "blinkmacsystemfont" | "ui-sans-serif" => {
+            Some(&[".AppleSystemUIFont", "Segoe UI"])
+        }
+        "sans-serif" => Some(&["Helvetica", "Arial", "Liberation Sans", "DejaVu Sans"]),
+        "serif" | "ui-serif" => Some(&[
+            "Times",
+            "Times New Roman",
+            "Liberation Serif",
+            "DejaVu Serif",
+        ]),
+        "monospace" | "ui-monospace" => {
+            Some(&["Menlo", "Consolas", "Liberation Mono", "DejaVu Sans Mono"])
+        }
+        "cursive" | "fantasy" | "emoji" | "math" | "fangsong" | "ui-rounded" => Some(&[]),
+        _ => None,
+    }
+}
+
+/// The families of a normalized stack from [`parse_font_stack`], in preference order.
+pub fn font_stack(family: &str) -> impl Iterator<Item = &str> {
+    family
         .split(',')
-        .map(|family| family.trim().trim_matches(['\'', '"']))
-        .find(|family| !family.is_empty())
-        .map(str::to_string)
+        .map(str::trim)
+        .filter(|family| !family.is_empty())
+}
+
+/// The first family of a stack, or [`DEFAULT_FONT_FAMILY`] when there is none.
+pub fn primary_family(family: Option<&str>) -> &str {
+    family
+        .and_then(|stack| font_stack(stack).next())
+        .unwrap_or(DEFAULT_FONT_FAMILY)
 }
 
 fn set_padding(style: &mut Style, [top, right, bottom, left]: [f32; 4]) {
@@ -532,10 +642,10 @@ fn set_padding(style: &mut Style, [top, right, bottom, left]: [f32; 4]) {
     style.padding_left = left;
 }
 
-fn parse_box_lengths(value: &str) -> Option<[f32; 4]> {
+fn parse_box_lengths(value: &str, em: f32) -> Option<[f32; 4]> {
     let values: Vec<f32> = value
         .split_whitespace()
-        .map(parse_length)
+        .map(|part| parse_length_in(part, em))
         .collect::<Option<_>>()?;
     match values.as_slice() {
         [all] => Some([*all; 4]),
@@ -552,7 +662,11 @@ fn parse_line_height(value: &str, font_size: f32) -> Option<f32> {
         .parse::<f32>()
         .ok()
         .map(|factor| factor * font_size)
-        .or_else(|| parse_length(value))
+        .or_else(|| {
+            parse_percentage(value)
+                .map(|percent| percent * font_size)
+                .or_else(|| parse_length_in(value, font_size))
+        })
 }
 
 fn apply_font_shorthand(style: &mut Style, value: &str) {
@@ -570,12 +684,12 @@ fn apply_font_shorthand(style: &mut Style, value: &str) {
         }
         let size_and_height = part.split_once('/');
         let size = size_and_height.map(|(size, _)| size).unwrap_or(part);
-        if let Some(px) = parse_length(size) {
+        if let Some(px) = parse_font_size(size, style.parent_font_size) {
             style.font_size = px;
             if let Some((_, height)) = size_and_height {
                 style.line_height = parse_line_height(height, px);
             }
-            style.font_family = parse_font_family(&parts[index + 1..].join(" "));
+            style.font_family = parse_font_stack(&parts[index + 1..].join(" "));
             break;
         }
     }
@@ -646,7 +760,50 @@ pub fn extract_url(value: &str) -> Option<String> {
 }
 
 /// Parse `12px`, `12`, `1.5em`, `9pt`. Percentages are resolved by layout instead.
+/// `<font size>`: an absolute level 1–7, or one relative to the default level 3 (`+1`, `-2`),
+/// on WebKit's legacy scale.
+fn legacy_font_size(value: &str) -> Option<f32> {
+    const SCALE: [f32; 7] = [10.0, 13.0, 16.0, 18.0, 24.0, 32.0, 48.0];
+    let value = value.trim();
+    let level = if value.starts_with(['+', '-']) {
+        3 + value.parse::<i32>().ok()?
+    } else {
+        value.parse::<f32>().ok()? as i32
+    };
+    Some(SCALE[(level.clamp(1, 7) - 1) as usize])
+}
+
+/// A `font-size` value against the parent's computed size: WebKit's absolute keywords, the
+/// relative `smaller`/`larger`, percentages and `em` of the parent, `rem`, and plain lengths.
+pub fn parse_font_size(value: &str, parent: f32) -> Option<f32> {
+    let value = value.trim().to_ascii_lowercase();
+    let keyword = match value.as_str() {
+        "xx-small" => Some(9.0),
+        "x-small" => Some(10.0),
+        "small" => Some(13.0),
+        "medium" => Some(16.0),
+        "large" => Some(18.0),
+        "x-large" => Some(24.0),
+        "xx-large" => Some(32.0),
+        "xxx-large" => Some(48.0),
+        "smaller" => Some(parent / 1.2),
+        "larger" => Some(parent * 1.2),
+        _ => None,
+    };
+    keyword
+        .or_else(|| parse_percentage(&value).map(|percent| parent * percent))
+        .or_else(|| parse_length_in(&value, parent))
+}
+
+/// A length with no element context: `em` and `rem` both resolve against [`DEFAULT_FONT_SIZE`].
+/// Inside a style, prefer [`parse_length_in`], which knows the element's font size.
 pub fn parse_length(input: &str) -> Option<f32> {
+    parse_length_in(input, DEFAULT_FONT_SIZE)
+}
+
+/// A length where `em` is the given size — the element's own computed font size for most
+/// properties, the parent's for `font-size` — and `rem` is the root size.
+pub fn parse_length_in(input: &str, em: f32) -> Option<f32> {
     let value = input.trim().to_ascii_lowercase();
     let (number, unit) = value
         .find(|c: char| c.is_ascii_alphabetic() || c == '%')
@@ -656,7 +813,8 @@ pub fn parse_length(input: &str) -> Option<f32> {
     match unit.as_str() {
         "" | "px" => Some(number),
         "pt" => Some(number * 4.0 / 3.0),
-        "em" | "rem" => Some(number * 15.0),
+        "em" => Some(number * em),
+        "rem" => Some(number * DEFAULT_FONT_SIZE),
         _ => None,
     }
 }
@@ -763,10 +921,136 @@ mod tests {
         assert_eq!(style.background, Some([255, 255, 255, 255]));
     }
 
+    // Regression (LinkedIn): the stack leads with aliases no font system matches, so taking only
+    // the first family meant none at all. Every family is kept, aliases and generics expanded.
+    #[test]
+    fn font_stacks_keep_every_family_and_expand_aliases() {
+        let stack = parse_font_stack(
+            "-apple-system, system-ui, BlinkMacSystemFont, 'Segoe UI', Roboto, \"Helvetica Neue\", \
+             Arial, sans-serif",
+        );
+        assert_eq!(
+            stack.as_deref(),
+            Some(
+                ".AppleSystemUIFont, Segoe UI, Roboto, Helvetica Neue, Arial, Helvetica, \
+                 Liberation Sans, DejaVu Sans"
+            )
+        );
+    }
+
+    #[test]
+    fn font_stacks_drop_repeats_case_insensitively_and_unmappable_generics() {
+        assert_eq!(
+            parse_font_stack("'Times New Roman', times, serif").as_deref(),
+            Some("Times New Roman, times, Liberation Serif, DejaVu Serif")
+        );
+        assert_eq!(parse_font_stack("cursive"), None);
+        assert_eq!(primary_family(None), DEFAULT_FONT_FAMILY);
+    }
+
+    #[test]
+    fn unstyled_text_uses_webkits_medium_size() {
+        assert_eq!(Style::default().font_size, 16.0);
+        let paragraph = resolve_style("p", &HashMap::new(), &Style::default());
+        assert_eq!(paragraph.font_size, 16.0);
+    }
+
+    // `em` in `font-size` is the parent's size; in every other property it is the element's own
+    // computed size — even when `font-size` is written after the property that uses it.
+    #[test]
+    fn em_resolves_against_the_right_font_size_in_any_declaration_order() {
+        let parent = Style {
+            font_size: 20.0,
+            ..Style::default()
+        };
+        let mut style = resolve_style("div", &HashMap::new(), &parent);
+        apply_inline_style(
+            &mut style,
+            "padding: 1em; font-size: 1.5em; margin-top: 0.5em",
+        );
+        assert_eq!(style.font_size, 30.0);
+        assert_eq!(style.padding_top, 30.0);
+        assert_eq!(style.margin_top, 15.0);
+    }
+
+    #[test]
+    fn rem_percent_and_keyword_font_sizes() {
+        let parent = Style {
+            font_size: 20.0,
+            ..Style::default()
+        };
+        let size = |css: &str| {
+            let mut style = resolve_style("span", &HashMap::new(), &parent);
+            apply_inline_style(&mut style, css);
+            style.font_size
+        };
+        assert_eq!(size("font-size: 2rem"), 32.0);
+        assert_eq!(size("font-size: 90%"), 18.0);
+        assert_eq!(size("font-size: small"), 13.0);
+        assert_eq!(size("font-size: x-large"), 24.0);
+        assert_eq!(size("font-size: larger"), 24.0);
+        assert_eq!(size("font: bold 1.5em/1.2 georgia"), 30.0);
+    }
+
+    #[test]
+    fn line_height_accepts_percentages_and_ems_of_the_elements_own_size() {
+        let mut style = Style::default();
+        apply_inline_style(&mut style, "font-size: 20px; line-height: 150%");
+        assert_eq!(style.line_height, Some(30.0));
+        apply_inline_style(&mut style, "line-height: 1.2em");
+        assert_eq!(style.line_height, Some(24.0));
+    }
+
+    #[test]
+    fn font_tag_relative_sizes_and_clamping() {
+        let size = |value: &str| {
+            resolve_style("font", &attrs(&[("size", value)]), &Style::default()).font_size
+        };
+        assert_eq!(size("+1"), 18.0);
+        assert_eq!(size("-1"), 13.0);
+        assert_eq!(size("2"), 13.0);
+        assert_eq!(size("3"), 16.0);
+        assert_eq!(size("7"), 48.0);
+        assert_eq!(size("9"), 48.0);
+        assert_eq!(size("+9"), 48.0);
+    }
+
+    // `size` on other elements is not a font size (`<hr size>` is a thickness).
+    #[test]
+    fn size_attribute_only_sets_font_size_on_font_elements() {
+        let rule = resolve_style("hr", &attrs(&[("size", "1")]), &Style::default());
+        assert_eq!(rule.font_size, 16.0);
+    }
+
+    #[test]
+    fn headings_are_bold_and_sized_relative_to_their_parent() {
+        let h1 = resolve_style("h1", &HashMap::new(), &Style::default());
+        assert_eq!((h1.font_size, h1.bold), (32.0, true));
+        let parent = Style {
+            font_size: 20.0,
+            ..Style::default()
+        };
+        let h2 = resolve_style("h2", &HashMap::new(), &parent);
+        assert_eq!((h2.font_size, h2.bold), (30.0, true));
+        let h6 = resolve_style("h6", &HashMap::new(), &Style::default());
+        assert!((h6.font_size - 10.72).abs() < 0.01);
+    }
+
+    #[test]
+    fn small_big_and_monospace_elements_follow_the_user_agent_stylesheet() {
+        let small = resolve_style("small", &HashMap::new(), &Style::default());
+        assert!((small.font_size - 16.0 / 1.2).abs() < 0.01);
+        let big = resolve_style("big", &HashMap::new(), &Style::default());
+        assert!((big.font_size - 19.2).abs() < 0.01);
+        let code = resolve_style("code", &HashMap::new(), &Style::default());
+        assert_eq!(code.font_size, 13.0);
+        assert_eq!(primary_family(code.font_family.as_deref()), "Menlo");
+    }
+
     #[test]
     fn font_tag_size_maps_to_the_legacy_scale() {
         let style = resolve_style("font", &attrs(&[("size", "5")]), &Style::default());
-        assert_eq!(style.font_size, 22.0);
+        assert_eq!(style.font_size, 24.0);
     }
 
     #[test]
@@ -791,7 +1075,12 @@ mod tests {
             &attrs(&[("face", "Arial, sans-serif"), ("color", "navy")]),
             &Style::default(),
         );
-        assert_eq!(font.font_family.as_deref(), Some("Arial"));
+        // The whole stack is kept, with the `sans-serif` generic expanded.
+        assert_eq!(primary_family(font.font_family.as_deref()), "Arial");
+        assert_eq!(
+            font.font_family.as_deref(),
+            Some("Arial, Helvetica, Liberation Sans, DejaVu Sans")
+        );
         assert_eq!(font.color, [0x1d, 0x44, 0x89, 0xff]);
     }
 
@@ -804,7 +1093,7 @@ mod tests {
         );
         assert_eq!(style.color, [0x11, 0x22, 0x33, 0xff]);
         assert_eq!(style.background, Some([0xee, 0xdd, 0xcc, 0xff]));
-        assert_eq!(style.font_family.as_deref(), Some("Georgia"));
+        assert_eq!(primary_family(style.font_family.as_deref()), "Georgia");
         assert_eq!(style.font_size, 18.0);
         assert!(style.bold && style.italic && style.underline);
         assert_eq!(style.align, Align::Center);

@@ -179,6 +179,27 @@ const fn serif(size: f32, line_height: f32, color: TextColor) -> TextSpec {
 }
 
 /// Resolve a role. Exhaustive, so a new variant cannot compile without a spec.
+/// A message-list row's vertical padding, and the gap between its lines, in pixels.
+pub const MESSAGE_ROW_PADDING_Y: f32 = 12.0;
+pub const MESSAGE_ROW_GAP: f32 = 4.0;
+
+/// The height of a message-list row: its padding, then sender, subject and a two-line preview at
+/// their roles' line heights. Derived rather than written down: a hand-picked 84px was about 15px
+/// shorter than the row's own text, which went unnoticed only because the preview spilled into
+/// the bottom padding — until rows started clipping their overflow, and the preview's second
+/// line lost its descenders.
+pub fn message_row_height() -> f32 {
+    let line = |role: TextRole| {
+        let spec = spec(role);
+        spec.size * spec.line_height
+    };
+    let sender = line(TextRole::RowSenderUnread).max(line(TextRole::RowSenderRead));
+    let subject = line(TextRole::RowSubjectUnread).max(line(TextRole::RowSubjectRead));
+    let preview = 2.0 * line(TextRole::RowPreview);
+    (2.0 * MESSAGE_ROW_PADDING_Y + sender + MESSAGE_ROW_GAP + subject + MESSAGE_ROW_GAP + preview)
+        .ceil()
+}
+
 pub fn spec(role: TextRole) -> TextSpec {
     use TextColor::*;
     match role {
@@ -258,6 +279,22 @@ pub fn spec(role: TextRole) -> TextSpec {
 
 #[cfg(test)]
 mod tests {
+
+    // Regression: the row was a fixed 84px while its text needed about 99px, so a clipped row cut
+    // the preview's second line through its descenders.
+    #[test]
+    fn a_message_row_fits_sender_subject_and_a_two_line_preview() {
+        let line = |role: TextRole| spec(role).size * spec(role).line_height;
+        let content = line(TextRole::RowSenderUnread)
+            + MESSAGE_ROW_GAP
+            + line(TextRole::RowSubjectUnread)
+            + MESSAGE_ROW_GAP
+            + 2.0 * line(TextRole::RowPreview);
+        let height = message_row_height();
+        assert!(height >= 2.0 * MESSAGE_ROW_PADDING_Y + content);
+        assert!(height - (2.0 * MESSAGE_ROW_PADDING_Y + content) < 1.0);
+        assert_eq!(height, 99.0);
+    }
     use super::*;
     use std::collections::HashSet;
 

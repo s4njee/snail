@@ -164,6 +164,19 @@ pub struct ContactRow {
     pub score: i64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThreadRow {
+    pub thread_id: i64,
+    /// The newest message in the thread, used as the selection target.
+    pub newest_id: i64,
+    pub subject: Option<String>,
+    pub from_name: Option<String>,
+    pub from_addr: Option<String>,
+    pub last_date: Option<i64>,
+    pub count: i64,
+    pub unread: i64,
+}
+
 pub struct Store {
     conn: Mutex<Connection>,
     cache: CacheStore,
@@ -409,6 +422,253 @@ impl Store {
             Some(hash) => self.cache.get(&hash),
             None => Ok(None),
         }
+    }
+
+    /// Apply a triage action optimistically and queue the remote op in the **same transaction**
+    /// (E8.4). Returns the op id for a later undo (E8.5).
+    pub fn apply_triage(
+        &self,
+        message_id: i64,
+        action: &crate::triage::TriageAction,
+        key: &str,
+        now: i64,
+    ) -> Result<i64> {
+        use crate::triage::{Mailbox, TriageAction, TriagePayload};
+        self.transaction(|tx| {
+            let (account_id, mailbox_name, unread, flagged): (i64, Option<String>, i64, i64) = tx
+                .query_row(
+                    "SELECT m.account_id, b.name, m.unread, m.flagged
+                     FROM message m LEFT JOIN mailbox b ON b.id = m.mailbox_id WHERE m.id = ?1",
+                    [message_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )?;
+            let payload = TriagePayload {
+                action: action.clone(),
+                previous_mailbox: mailbox_name,
+                previous_unread: unread != 0,
+                previous_flagged: flagged != 0,
+            };
+
+            let target = match action {
+                TriageAction::Archive => Some(Mailbox::Archive.name().to_string()),
+                TriageAction::Trash => Some(Mailbox::Trash.name().to_string()),
+                TriageAction::Move { mailbox } => Some(mailbox.clone()),
+                _ => None,
+            };
+            if let Some(name) = &target {
+                tx.execute(
+                    "INSERT OR IGNORE INTO mailbox (account_id, name, kind) VALUES (?1, ?2, ?3)",
+                    params![account_id, name, kind_for_name(name)],
+                )?;
+                let mailbox_id: i64 = tx.query_row(
+                    "SELECT id FROM mailbox WHERE account_id = ?1 AND name = ?2",
+                    params![account_id, name],
+                    |row| row.get(0),
+                )?;
+                tx.execute(
+                    "UPDATE message SET mailbox_id = ?2 WHERE id = ?1",
+                    params![message_id, mailbox_id],
+                )?;
+            }
+            match action {
+                TriageAction::MarkRead(read) => {
+                    tx.execute(
+                        "UPDATE message SET unread = ?2 WHERE id = ?1",
+                        params![message_id, if *read { 0 } else { 1 }],
+                    )?;
+                }
+                TriageAction::MarkFlagged(flagged) => {
+                    tx.execute(
+                        "UPDATE message SET starred = ?2 WHERE id = ?1",
+                        params![message_id, *flagged as i64],
+                    )?;
+                }
+                _ => {}
+            }
+
+            tx.execute(
+                "INSERT OR IGNORE INTO pending_op (
+                    account_id, target_kind, target_id, operation, payload_json,
+                    idempotency_key, attempts, state, created_at, updated_at
+                 ) VALUES (?1, 'message', ?2, ?3, ?4, ?5, 0, 'pending', ?6, ?6)",
+                params![
+                    account_id,
+                    message_id,
+                    action.operation(),
+                    payload.to_json(),
+                    key,
+                    now
+                ],
+            )?;
+            Ok(tx.query_row(
+                "SELECT id FROM pending_op WHERE idempotency_key = ?1",
+                [key],
+                |row| row.get(0),
+            )?)
+        })
+    }
+
+    /// Undo a triage op: restore the row, and either cancel the queued op (still pending) or queue
+    /// its inverse (already dispatched). Returns true when an inverse was queued (E8.5).
+    pub fn undo_triage(&self, op_id: i64, now: i64) -> Result<bool> {
+        use crate::triage::{TriageAction, TriagePayload};
+        self.transaction(|tx| {
+            let (state, payload_json, target_id): (String, Option<String>, Option<i64>) = tx.query_row(
+                "SELECT state, payload_json, target_id FROM pending_op WHERE id = ?1",
+                [op_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            let Some(payload) = payload_json.as_deref().and_then(TriagePayload::from_json) else {
+                return Ok(false);
+            };
+            let Some(message_id) = target_id else {
+                return Ok(false);
+            };
+            let account_id: i64 = tx.query_row(
+                "SELECT account_id FROM message WHERE id = ?1",
+                [message_id],
+                |row| row.get(0),
+            )?;
+
+            if let Some(name) = &payload.previous_mailbox {
+                tx.execute(
+                    "INSERT OR IGNORE INTO mailbox (account_id, name, kind) VALUES (?1, ?2, ?3)",
+                    params![account_id, name, kind_for_name(name)],
+                )?;
+                let mailbox_id: i64 = tx.query_row(
+                    "SELECT id FROM mailbox WHERE account_id = ?1 AND name = ?2",
+                    params![account_id, name],
+                    |row| row.get(0),
+                )?;
+                tx.execute(
+                    "UPDATE message SET mailbox_id = ?2 WHERE id = ?1",
+                    params![message_id, mailbox_id],
+                )?;
+            }
+            tx.execute(
+                "UPDATE message SET unread = ?2, starred = ?3 WHERE id = ?1",
+                params![
+                    message_id,
+                    payload.previous_unread as i64,
+                    payload.previous_flagged as i64
+                ],
+            )?;
+
+            let inverse = payload
+                .action
+                .toggle_inverse()
+                .or_else(|| {
+                    payload.previous_mailbox.clone().map(|mailbox| TriageAction::Move { mailbox })
+                });
+            if state == "pending" {
+                // Still local: cancel it and we are done.
+                tx.execute(
+                    "UPDATE pending_op SET state = 'cancelled', updated_at = ?2 WHERE id = ?1",
+                    params![op_id, now],
+                )?;
+                return Ok(false);
+            }
+            if let Some(inverse) = inverse {
+                let inverse_payload = TriagePayload {
+                    action: inverse.clone(),
+                    previous_mailbox: None,
+                    previous_unread: !payload.previous_unread,
+                    previous_flagged: !payload.previous_flagged,
+                };
+                let key = format!("undo:{op_id}");
+                tx.execute(
+                    "INSERT OR IGNORE INTO pending_op (
+                        account_id, target_kind, target_id, operation, payload_json,
+                        idempotency_key, attempts, state, created_at, updated_at
+                     ) VALUES (?1, 'message', ?2, ?3, ?4, ?5, 0, 'pending', ?6, ?6)",
+                    params![
+                        account_id,
+                        message_id,
+                        inverse.operation(),
+                        inverse_payload.to_json(),
+                        key,
+                        now
+                    ],
+                )?;
+                return Ok(true);
+            }
+            Ok(false)
+        })
+    }
+
+    /// One row per thread in a mailbox, newest first — the "group by thread" list shape (E8.3).
+    pub fn thread_page(&self, mailbox_id: i64, limit: u32) -> Result<Vec<ThreadRow>> {
+        // Group by the real thread where there is one, and by the message itself where there is
+        // not (a Sent copy, an import): coalescing to `-id` keeps those visible as singletons
+        // instead of dropping them from a join. The newest row supplies the summary fields.
+        self.with_db(|conn| {
+            let mut statement = conn.prepare(
+                "WITH ranked AS (
+                     SELECT id, COALESCE(thread_id, -id) AS grp, subject, from_name, from_addr,
+                            date, unread,
+                            COUNT(*) OVER (PARTITION BY COALESCE(thread_id, -id)) AS cnt,
+                            SUM(unread) OVER (PARTITION BY COALESCE(thread_id, -id)) AS unread_sum,
+                            MAX(date) OVER (PARTITION BY COALESCE(thread_id, -id)) AS last_date,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY COALESCE(thread_id, -id) ORDER BY date DESC, id DESC
+                            ) AS rank
+                     FROM message WHERE mailbox_id = ?1
+                 )
+                 SELECT grp, id, subject, from_name, from_addr, last_date, cnt, unread_sum
+                 FROM ranked WHERE rank = 1
+                 ORDER BY last_date DESC LIMIT ?2",
+            )?;
+            let rows = statement.query_map(params![mailbox_id, limit], |row| {
+                Ok(ThreadRow {
+                    thread_id: row.get(0)?,
+                    newest_id: row.get(1)?,
+                    subject: row.get(2)?,
+                    from_name: row.get(3)?,
+                    from_addr: row.get(4)?,
+                    last_date: row.get(5)?,
+                    count: row.get(6)?,
+                    unread: row.get(7)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    pub fn thread_id_of(&self, message_id: i64) -> Result<Option<i64>> {
+        self.with_db(|conn| {
+            use rusqlite::OptionalExtension as _;
+            Ok(conn
+                .query_row(
+                    "SELECT thread_id FROM message WHERE id = ?1",
+                    [message_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .flatten())
+        })
+    }
+
+    /// Every message in a thread, oldest first — the thread view (E8.2) and thread actions (E8.8).
+    pub fn messages_in_thread(&self, thread_id: i64) -> Result<Vec<MessageRow>> {
+        self.with_db(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT id, subject, from_name, from_addr, date, preview, unread, body_hash
+                 FROM message WHERE thread_id = ?1 ORDER BY date ASC",
+            )?;
+            let rows = statement.query_map([thread_id], |row| {
+                Ok(MessageRow {
+                    id: row.get(0)?,
+                    subject: row.get(1)?,
+                    from_name: row.get(2)?,
+                    from_addr: row.get(3)?,
+                    date: row.get(4)?,
+                    preview: row.get(5)?,
+                    unread: row.get::<_, i64>(6)? != 0,
+                    body_hash: row.get(7)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
     }
 
     /// Insert or update a local draft (E7.6). Drafts are messages in the Drafts mailbox with
@@ -942,6 +1202,17 @@ impl Store {
     }
 }
 
+fn kind_for_name(name: &str) -> &'static str {
+    match name.to_ascii_lowercase().as_str() {
+        "inbox" => "inbox",
+        "sent" | "sent messages" => "sent",
+        "drafts" => "drafts",
+        "archive" | "all mail" => "archive",
+        "trash" | "deleted messages" => "trash",
+        _ => "other",
+    }
+}
+
 fn configure(conn: &Connection) -> Result<()> {
     // WAL for a responsive reader alongside the writer; NORMAL is the right durability for a cache.
     let _mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
@@ -1209,6 +1480,111 @@ mod tests {
         assert_eq!(store.op_counts().unwrap().dead, 1);
         assert_eq!(store.requeue_failed_ops().unwrap(), 1);
         assert_eq!(store.op_counts().unwrap().pending, 1);
+    }
+
+    #[test]
+    fn archive_is_optimistic_and_undoable() {
+        use crate::triage::TriageAction;
+        let store = store_with_account();
+        let inbox = store.ensure_mailbox(1, "Inbox", "inbox").unwrap();
+        let message = store
+            .insert_message(&NewMessage {
+                account_id: 1,
+                mailbox_id: Some(inbox),
+                provider: Some(ProviderRef::Gmail {
+                    id: "g1".into(),
+                    thread_id: None,
+                    history_id: None,
+                }),
+                subject: Some("x".into()),
+                unread: true,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let op = store
+            .apply_triage(message, &TriageAction::Archive, "archive:1", 0)
+            .unwrap();
+        let archive = store.mailbox_id(1, "Archive").unwrap().unwrap();
+        assert_eq!(store.page(archive, 10, 0).unwrap().len(), 1, "moved locally");
+        assert_eq!(store.pending_ops(10).unwrap().len(), 1, "queued remotely");
+
+        // Undo before dispatch: back to Inbox, op cancelled (not retried).
+        assert!(!store.undo_triage(op, 1).unwrap());
+        assert_eq!(store.page(inbox, 10, 0).unwrap().len(), 1);
+        assert!(store.pending_ops(10).unwrap().is_empty(), "cancelled op is not pending");
+    }
+
+    #[test]
+    fn mark_read_undo_restores_the_flag() {
+        use crate::triage::TriageAction;
+        let store = store_with_account();
+        let message = store
+            .insert_message(&NewMessage {
+                account_id: 1,
+                provider: Some(ProviderRef::Gmail {
+                    id: "g1".into(),
+                    thread_id: None,
+                    history_id: None,
+                }),
+                unread: true,
+                ..Default::default()
+            })
+            .unwrap();
+        let op = store
+            .apply_triage(message, &TriageAction::MarkRead(true), "read:1", 0)
+            .unwrap();
+        assert!(!store.message(message).unwrap().unwrap().unread);
+        store.set_op_state(op, "done", None, 1).unwrap();
+        // Already dispatched: undo queues the inverse.
+        assert!(store.undo_triage(op, 2).unwrap());
+        assert!(store.message(message).unwrap().unwrap().unread, "flag restored");
+        assert_eq!(store.pending_ops(10).unwrap().len(), 1, "inverse queued");
+    }
+
+    #[test]
+    fn thread_page_keeps_a_message_without_a_thread() {
+        let store = store_with_account();
+        let inbox = store.ensure_mailbox(1, "Inbox", "inbox").unwrap();
+        let thread = store.ensure_thread(1, Some("t1"), None).unwrap();
+        let threaded = store
+            .insert_message(&NewMessage {
+                account_id: 1,
+                mailbox_id: Some(inbox),
+                thread_id: Some(thread),
+                provider: Some(ProviderRef::Gmail {
+                    id: "a".into(),
+                    thread_id: None,
+                    history_id: None,
+                }),
+                subject: Some("hi".into()),
+                date: Some(10),
+                ..Default::default()
+            })
+            .unwrap();
+        let solo = store
+            .insert_message(&NewMessage {
+                account_id: 1,
+                mailbox_id: Some(inbox),
+                thread_id: None,
+                provider: Some(ProviderRef::Gmail {
+                    id: "b".into(),
+                    thread_id: None,
+                    history_id: None,
+                }),
+                subject: Some("solo".into()),
+                date: Some(20),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let page = store.thread_page(inbox, 10).unwrap();
+        assert_eq!(page.len(), 2, "the threadless message is its own thread");
+        assert_eq!(page[0].newest_id, solo, "newest first");
+        assert_eq!(page[0].thread_id, -solo, "keyed by -id so it never collides");
+        assert!(page.iter().any(|row| row.newest_id == threaded));
+        // The threadless message is not dropped from the grouped list.
+        assert!(page.iter().any(|row| row.newest_id == solo));
     }
 
     #[test]

@@ -9,7 +9,7 @@
 use std::time::{Duration, Instant};
 
 use crate::html::{
-    Align, Color, Display, Element, FontSpec, ListStyle, Node, Style, VerticalAlign,
+    Align, Color, Display, Element, FontSpec, ListStyle, Node, Style, VerticalAlign, primary_family,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -92,10 +92,64 @@ pub enum LayoutError {
     TimeBudget,
 }
 
-const LINE_FACTOR: f32 = 1.45;
+/// The width a document is laid out at before the reading pane has been measured — only the
+/// first frame of the first HTML message after launch; every later layout uses the pane's real
+/// width.
+pub const DEFAULT_DOCUMENT_WIDTH: f32 = 640.0;
 
+/// The narrowest width a document is laid out at. 320px is the narrowest layout responsive email
+/// templates target; below it, table layouts degenerate into one word per line, which is worse
+/// than letting a narrow pane clip the right edge.
+pub const MIN_DOCUMENT_WIDTH: f32 = 320.0;
+
+/// The width to lay a document out at, given the reading pane's measured content width (its
+/// width inside its padding). Floored to whole pixels: at fractional scale factors the measured
+/// width can differ by a fraction of a pixel between frames, and the document must never be a
+/// fraction wider than the box it sits in.
+pub fn document_width(content_width: f32) -> f32 {
+    if content_width.is_finite() {
+        content_width.floor().max(MIN_DOCUMENT_WIDTH)
+    } else {
+        DEFAULT_DOCUMENT_WIDTH
+    }
+}
+
+/// Whether a document laid out at `laid_out` needs laying out again for `target`. Both come from
+/// [`document_width`], so any real change is at least a whole pixel.
+pub fn width_changed(laid_out: f32, target: f32) -> bool {
+    (laid_out - target).abs() >= 0.5
+}
+
+/// A line's height: the specified `line-height`, else the font's `normal` line height.
 pub fn line_height(font: &FontSpec) -> f32 {
-    font.line_height.unwrap_or(font.size * LINE_FACTOR)
+    font.line_height
+        .unwrap_or_else(|| font.size * normal_line_factor(font.family.as_deref()))
+}
+
+/// CSS `line-height: normal` as a multiple of the font size, for the families email uses.
+///
+/// Measured from the installed fonts with WebKit's macOS rule (`FontCocoa`): ascent + descent +
+/// line gap, with Times, Helvetica and Courier given 15% extra ascent to match their Microsoft
+/// metrics. The rule reproduces the published browser values (Arial 1.149, Georgia 1.136,
+/// Verdana 1.215). Unlisted families use 1.2, the usual approximation. This replaces a flat
+/// 1.45, which made every unstyled line 25–30% looser than Apple Mail.
+pub fn normal_line_factor(family: Option<&str>) -> f32 {
+    match primary_family(family).to_ascii_lowercase().as_str() {
+        "helvetica" | "arial" | "times" | "times new roman" | "courier" => 1.15,
+        "georgia" => 1.136,
+        "verdana" => 1.215,
+        "tahoma" => 1.207,
+        "trebuchet ms" => 1.161,
+        "courier new" => 1.133,
+        "menlo" => 1.164,
+        "helvetica neue" => 1.193,
+        ".applesystemuifont" | "lucida grande" => 1.178,
+        "palatino" => 1.1,
+        "gill sans" => 1.148,
+        "futura" => 1.328,
+        "avenir" => 1.366,
+        _ => 1.2,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -411,51 +465,82 @@ fn layout_list_item(
     }))
 }
 
-fn intrinsic_image_size(element: &Element, available: f32) -> (f32, f32) {
-    let width = element
-        .style
+/// The box reserved for an image whose pixels are not known yet (a blocked remote image, or one
+/// still loading). Only its *aspect ratio* matters once the sender specifies a dimension.
+pub const PLACEHOLDER_IMAGE: (f32, f32) = (240.0, 140.0);
+
+/// CSS sizing for a replaced element (`<img>`), per CSS 2.1 §10.3.2 / §10.6.2 and the
+/// `max-width` rules of §10.4 — the same algorithm WebKit, and therefore Apple Mail, runs:
+///
+/// - both dimensions specified: use them as given (the image is then stretched to fill);
+/// - one specified: complete the other from the image's **natural aspect ratio**;
+/// - neither: use the natural size;
+/// - then `max-width` clamps the width, and the height follows the ratio unless it was specified.
+///
+/// Percentage heights are treated as `auto`: email containers have no definite height, which is
+/// exactly the case CSS resolves a percentage height to `auto`.
+fn replaced_size(element: &Element, available: f32) -> (f32, f32) {
+    let style = &element.style;
+    let specified_w = style
         .width
-        .or_else(|| {
-            element
-                .style
-                .width_percent
-                .map(|percent| available * percent)
-        })
-        .or(element.style.max_width)
-        .or_else(|| {
-            element
-                .style
-                .max_width_percent
-                .map(|percent| available * percent)
-        })
-        .unwrap_or(24.0)
-        .max(1.0);
-    let image_hint = format!(
+        .or_else(|| style.width_percent.map(|percent| available * percent));
+    let specified_h = style.height;
+    let (mut width, mut height) = match (style.natural_size, specified_w, specified_h) {
+        (_, Some(width), Some(height)) => (width, height),
+        // The pixels are known: complete a missing dimension from the real aspect ratio.
+        (Some((natural_w, natural_h)), Some(width), None) => {
+            (width, width * ratio(natural_w, natural_h))
+        }
+        (Some((natural_w, natural_h)), None, Some(height)) => {
+            (height / ratio(natural_w, natural_h), height)
+        }
+        (Some(natural), None, None) => natural,
+        // Not known yet (blocked or still loading): reserve a guessed box. This is the only
+        // place a guess is allowed, and it is replaced by the real size as soon as the image
+        // decodes.
+        (None, Some(width), None) => (width, placeholder_height(element, width)),
+        (None, None, Some(height)) => (height, height),
+        (None, None, None) => PLACEHOLDER_IMAGE,
+    };
+    let max_width = style
+        .max_width
+        .or_else(|| style.max_width_percent.map(|percent| available * percent));
+    if let Some(max_width) = max_width
+        && width > max_width
+        && width > 0.0
+    {
+        // `max-width` clamps the width; an auto height follows proportionally, while a
+        // specified height stays as specified (so the image stretches, as it does in a browser).
+        if specified_h.is_none() {
+            height *= max_width / width;
+        }
+        width = max_width;
+    }
+    (width.max(0.0), height.max(0.0))
+}
+
+fn ratio(width: f32, height: f32) -> f32 {
+    if width > 0.0 { height / width } else { 1.0 }
+}
+
+/// A guessed height for an image of known width but unknown pixels. Wide images named like
+/// logos or headers are usually banners, so a banner-shaped box reserves far less empty space.
+/// Otherwise the placeholder's fixed height: a blocked image must never reserve *more* space
+/// than a fixed placeholder does, or a newsletter full of blocked heroes becomes mostly gaps.
+fn placeholder_height(element: &Element, width: f32) -> f32 {
+    let hint = format!(
         "{} {}",
         element.attrs.get("src").map(String::as_str).unwrap_or(""),
         element.attrs.get("alt").map(String::as_str).unwrap_or("")
     )
     .to_ascii_lowercase();
-    let inferred_height =
-        if width >= 200.0 && (image_hint.contains("logo") || image_hint.contains("header")) {
-            (width * 0.12).clamp(32.0, 120.0)
-        } else if width >= 200.0 {
-            width * 0.4
-        } else {
-            width
-        };
-    let height = element
-        .style
-        .height
-        .or_else(|| {
-            element
-                .style
-                .height_percent
-                .map(|percent| available * percent)
-        })
-        .unwrap_or(inferred_height)
-        .max(1.0);
-    (width, height)
+    if width >= 200.0 && (hint.contains("logo") || hint.contains("header")) {
+        (width * 0.12).clamp(32.0, 120.0)
+    } else {
+        PLACEHOLDER_IMAGE
+            .1
+            .min(width * ratio(PLACEHOLDER_IMAGE.0, PLACEHOLDER_IMAGE.1))
+    }
 }
 
 fn layout_standalone_image(
@@ -465,7 +550,7 @@ fn layout_standalone_image(
     available: f32,
     out: &mut Vec<Fragment>,
 ) -> f32 {
-    let (mut width, mut height) = intrinsic_image_size(element, available);
+    let (mut width, mut height) = replaced_size(element, available);
     if width > available {
         let scale = available / width;
         width = available;
@@ -1002,13 +1087,21 @@ fn natural_width(nodes: &[Node], measure: &dyn TextMeasure) -> f32 {
                 }
                 Node::Element(element) if element.style.display == Display::None => {}
                 Node::Element(element) if element.tag == "img" => {
-                    let width = element
-                        .style
-                        .width
-                        .or_else(|| element.style.width_percent.map(|percent| 220.0 * percent))
-                        .or(element.style.max_width)
-                        .unwrap_or(24.0);
-                    longest = longest.max(width);
+                    // Measure with percentages set aside: they resolve against the container,
+                    // which is exactly what is being measured here.
+                    let mut fixed = element.clone();
+                    fixed.style.width_percent = None;
+                    fixed.style.max_width_percent = None;
+                    let (width, _) = replaced_size(&fixed, 0.0);
+                    // Per CSS Sizing, an image whose width or max-width is a percentage is
+                    // "compressible": it contributes nothing to min-content and its size to
+                    // max-content. (This used to resolve percentages against a guessed 220px,
+                    // which under-sized any auto-layout column holding a full-width image.)
+                    let compressible = element.style.width_percent.is_some()
+                        || element.style.max_width_percent.is_some();
+                    if !compressible {
+                        longest = longest.max(width);
+                    }
                     total += width;
                 }
                 Node::Element(element) => {
@@ -1044,7 +1137,7 @@ fn collect_inline(
                 Display::None => {}
                 Display::Inline if element.tag == "br" => out.push(Token::Break),
                 Display::Inline if element.tag == "img" => {
-                    let (width, height) = intrinsic_image_size(element, available);
+                    let (width, height) = replaced_size(element, available);
                     out.push(Token::Image {
                         src: element.attrs.get("src").cloned().unwrap_or_default(),
                         width,
@@ -1386,6 +1479,151 @@ mod tests {
             [Fragment::Image { rect, src }] if *rect == Rect { x: 0.0, y: 0.0, w: 80.0, h: 40.0 } && src == "cid:hero"
         ));
         assert_eq!(layout.height, 40.0);
+    }
+
+    #[test]
+    fn document_width_is_the_panes_content_width_floored_with_a_minimum() {
+        assert_eq!(document_width(812.6), 812.0);
+        assert_eq!(document_width(1400.0), 1400.0);
+        // Narrow panes and the zero width of a pane that is not laid out yet hit the floor.
+        assert_eq!(document_width(200.0), MIN_DOCUMENT_WIDTH);
+        assert_eq!(document_width(0.0), MIN_DOCUMENT_WIDTH);
+        assert_eq!(document_width(f32::NAN), DEFAULT_DOCUMENT_WIDTH);
+        assert_eq!(document_width(f32::INFINITY), DEFAULT_DOCUMENT_WIDTH);
+    }
+
+    #[test]
+    fn only_whole_pixel_width_changes_trigger_a_relayout() {
+        assert!(!width_changed(640.0, 640.0));
+        assert!(!width_changed(640.0, 640.4));
+        assert!(width_changed(640.0, 641.0));
+        assert!(width_changed(900.0, 640.0));
+        // Sub-pixel jitter in the measured width never survives `document_width`.
+        assert!(!width_changed(document_width(812.2), document_width(812.9)));
+    }
+
+    // A document takes the width it is given: text wraps to it and a full-width image fills it,
+    // which is what lets the reading pane use its real width instead of a fixed 640px.
+    #[test]
+    fn layout_uses_the_width_it_is_given() {
+        let paragraph = || Node::Element(element("p", vec![Node::Text("word ".repeat(80))]));
+        let narrow = layout(&[paragraph()], 400.0, &Fake);
+        let wide = layout(&[paragraph()], 1000.0, &Fake);
+        assert!(narrow.height > wide.height);
+        // `words()` yields each word's origin; `Fake` sets every glyph 10px wide.
+        let right_edge = |layout: &Layout| {
+            layout
+                .words()
+                .map(|(word, x, _, _)| x + word.chars().count() as f32 * 10.0)
+                .fold(0.0, f32::max)
+        };
+        assert!(right_edge(&narrow) <= 400.0);
+        assert!(right_edge(&wide) <= 1000.0 && right_edge(&wide) > 400.0);
+
+        let mut image = element("img", vec![]);
+        image.style.display = Display::Block;
+        image.style.width_percent = Some(1.0);
+        image.style.natural_size = Some((1200.0, 600.0));
+        let rect = image_box(image, 900.0);
+        assert_eq!((rect.w, rect.h), (900.0, 450.0));
+    }
+
+    // `line-height: normal` is per font, as WebKit measures it; it was a flat 1.45.
+    #[test]
+    fn normal_line_height_follows_the_font() {
+        let spec = |family: Option<&str>| FontSpec {
+            family: family.map(str::to_string),
+            size: 20.0,
+            bold: false,
+            italic: false,
+            line_height: None,
+        };
+        assert!((line_height(&spec(Some("Helvetica"))) - 23.0).abs() < 0.01);
+        assert!((line_height(&spec(Some("georgia"))) - 22.72).abs() < 0.01);
+        assert!((line_height(&spec(Some("Verdana, Arial"))) - 24.3).abs() < 0.01);
+        // The default family is Helvetica, so no family means Helvetica's metrics.
+        assert!((line_height(&spec(None)) - 23.0).abs() < 0.01);
+        assert!((line_height(&spec(Some("Some Unknown Face"))) - 24.0).abs() < 0.01);
+        // A specified line height always wins.
+        let explicit = FontSpec {
+            line_height: Some(31.0),
+            ..spec(Some("Helvetica"))
+        };
+        assert_eq!(line_height(&explicit), 31.0);
+    }
+
+    /// The single image box a lone `<img>` lays out to.
+    fn image_box(image: Element, available: f32) -> Rect {
+        let layout = layout(&[Node::Element(image)], available, &Fake);
+        match layout.fragments.as_slice() {
+            [Fragment::Image { rect, .. }] => *rect,
+            other => panic!("expected one image fragment, got {other:?}"),
+        }
+    }
+
+    fn block_image(natural: Option<(f32, f32)>) -> Element {
+        let mut image = element("img", vec![]);
+        image.style.display = Display::Block;
+        image.style.natural_size = natural;
+        image
+    }
+
+    // Regression (NYT breaking-news hero): `width="600" style="width:100%;height:auto"` on a
+    // 1050x700 photo. This rendered at 240x140 — the placeholder — even after the image loaded,
+    // and GPUI's `Contain` fit then shrank the photo inside that box to about 210x140.
+    #[test]
+    fn width_only_image_takes_its_height_from_the_natural_aspect_ratio() {
+        let mut image = block_image(Some((1050.0, 700.0)));
+        image.style.width_percent = Some(1.0);
+        let rect = image_box(image, 600.0);
+        assert_eq!((rect.w, rect.h), (600.0, 400.0));
+    }
+
+    // Regression (LinkedIn header icons): only `height="25"`. The missing width used to fall to
+    // the 240px placeholder, putting three 25px icons in 720px of a 512px email.
+    #[test]
+    fn height_only_image_takes_its_width_from_the_natural_aspect_ratio() {
+        let mut image = block_image(Some((50.0, 50.0)));
+        image.style.height = Some(25.0);
+        let rect = image_box(image, 512.0);
+        assert_eq!((rect.w, rect.h), (25.0, 25.0));
+    }
+
+    // Regression (NYT header): `max-width:600px` on a 1200x110 retina asset, no height. The
+    // width clamps and the auto height must follow it down rather than stay at the natural 110.
+    #[test]
+    fn max_width_clamp_carries_an_auto_height_down_proportionally() {
+        let mut image = block_image(Some((1200.0, 110.0)));
+        image.style.max_width = Some(600.0);
+        let rect = image_box(image, 640.0);
+        assert_eq!((rect.w, rect.h), (600.0, 55.0));
+    }
+
+    // Regression (NYT footer "Zeta" / AdChoices logos): `width="150"` on a 300x30 image. These
+    // were padded out to 140px tall, which is most of the "huge spacing between items".
+    #[test]
+    fn small_width_only_logo_does_not_reserve_a_placeholder_height_once_loaded() {
+        let mut image = block_image(Some((300.0, 30.0)));
+        image.style.width = Some(150.0);
+        let rect = image_box(image, 600.0);
+        assert_eq!((rect.w, rect.h), (150.0, 15.0));
+    }
+
+    #[test]
+    fn unsized_image_uses_its_natural_size() {
+        let rect = image_box(block_image(Some((320.0, 180.0))), 600.0);
+        assert_eq!((rect.w, rect.h), (320.0, 180.0));
+    }
+
+    // Both dimensions specified is the one case a browser distorts rather than preserving the
+    // ratio; matching it is what makes `object-fit: fill` the correct paint mode.
+    #[test]
+    fn fully_specified_image_keeps_the_senders_box() {
+        let mut image = block_image(Some((1050.0, 700.0)));
+        image.style.width = Some(200.0);
+        image.style.height = Some(50.0);
+        let rect = image_box(image, 600.0);
+        assert_eq!((rect.w, rect.h), (200.0, 50.0));
     }
 
     #[test]

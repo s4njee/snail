@@ -19,6 +19,22 @@ layout, and unsupported declarations are discarded instead of guessed.
 Legacy email attributes are resolved before CSS: `bgcolor`, `align`, `valign`, `width`, `height`,
 `cellpadding`, `cellspacing`, `border`, `colspan`, `rowspan`, and `<font size color face>`.
 
+## Defaults and units follow WebKit
+
+Unstyled text matches Apple Mail rather than Snail's own UI:
+
+- The base size is 16px. `em` resolves against the element's own font size, or the parent's for
+  `font-size` itself; `rem` against 16px; `%` font sizes against the parent. The absolute
+  keywords (`x-small` … `xxx-large`) and `smaller` / `larger` are supported.
+- `<font size>` uses WebKit's legacy scale — 1–7 map to 10, 13, 16, 18, 24, 32 and 48px — and
+  accepts relative sizes such as `+1`.
+- Headings take WebKit's relative sizes and are bold; `<small>` / `<big>` are `smaller` / `larger`.
+- `font-family` keeps the whole stack. CSS generics and system aliases (`sans-serif`, `serif`,
+  `monospace`, `-apple-system`, `system-ui`, `BlinkMacSystemFont`) are expanded to concrete
+  families, and the first one installed is used; with none installed, Helvetica.
+- `line-height: normal` is per font — e.g. 1.15 for Helvetica and Arial, 1.136 for Georgia, 1.215
+  for Verdana — as WebKit computes it on macOS, and 1.2 for fonts it does not know.
+
 ## Intentionally unsupported
 
 `float`, `position`, flexbox, grid, transforms, media queries, pseudo-elements, animation, and web

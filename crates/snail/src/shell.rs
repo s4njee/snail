@@ -4,6 +4,7 @@
 //! E5.12's job.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::prelude::*;
@@ -19,7 +20,6 @@ use crate::mail_model::{MailModel, MailboxRow, MessageRow};
 use crate::settings;
 use crate::style::{self, ThemePref};
 
-const ROW_HEIGHT: f32 = 84.0;
 const PAGE: u32 = 200;
 
 struct Reading {
@@ -54,6 +54,13 @@ struct RemoteImage {
     bgra: Vec<u8>,
 }
 
+/// A transient undo affordance after a triage action (E8.5), covering a whole batch (E8.7).
+struct UndoBar {
+    ops: Vec<i64>,
+    label: String,
+    at: Instant,
+}
+
 pub struct Shell {
     focus: FocusHandle,
     overlay: DevOverlay,
@@ -72,10 +79,27 @@ pub struct Shell {
     /// The inline reply box (E7.5).
     inline_reply: Entity<TextareaState>,
     inline_open: bool,
+    /// The transient undo affordance after a triage action (E8.5).
+    undo: Option<UndoBar>,
+    /// "Group messages by thread" (E8.3).
+    group_threads: bool,
     /// Set when the user clicks "Load images" for the current message (E6.2), independent of the
     /// global switch and the per-sender allowance.
     forced_message: Option<i64>,
+    /// The width HTML is laid out at: the reading pane's content width as last measured, via
+    /// `snail_ui::layout::document_width`. `None` until the pane has been laid out once.
+    html_width: Option<f32>,
+    /// The pending debounced relayout. Replacing it drops, and so cancels, the previous one, which
+    /// is what keeps a window-edge drag from re-running layout on every frame.
+    html_relayout: Option<Task<()>>,
+    /// Set when the debounce fires; the relayout itself runs in render, where the window's text
+    /// system is available (the same pattern as `pending_remote`).
+    html_relayout_due: bool,
 }
+
+/// How long the reading pane's width must hold still before HTML is laid out again. Long enough
+/// to span the frames of a window-edge drag, short enough to feel like a response to letting go.
+const HTML_RELAYOUT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(120);
 
 impl Shell {
     pub fn new(mail: MailModel, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -104,7 +128,12 @@ impl Shell {
             reading_scroll: ScrollHandle::new(),
             inline_reply,
             inline_open: false,
+            undo: None,
+            group_threads: true,
             forced_message: None,
+            html_width: None,
+            html_relayout: None,
+            html_relayout_due: false,
         };        shell.reload(window, cx);
         // Harvest contacts once on the background executor so autocomplete has data (E7.3).
         {
@@ -124,11 +153,17 @@ impl Shell {
         if self.selected_mailbox >= self.mailboxes.len() {
             self.selected_mailbox = 0;
         }
-        let rows = self
-            .mailboxes
-            .get(self.selected_mailbox)
-            .map(|mailbox| self.mail.page(mailbox.id, PAGE))
-            .unwrap_or_default();
+        let rows = match self.mailboxes.get(self.selected_mailbox) {
+            // Group by thread: one row per thread, its newest message (E8.3).
+            Some(mailbox) if self.group_threads => self
+                .mail
+                .thread_page(mailbox.id, PAGE)
+                .into_iter()
+                .filter_map(|thread| self.mail.message(thread.newest_id))
+                .collect(),
+            Some(mailbox) => self.mail.page(mailbox.id, PAGE),
+            None => Vec::new(),
+        };
         self.rows = Arc::new(rows);
         log::info!(
             "shell: {} mailboxes; {} messages in mailbox #{}",
@@ -150,6 +185,14 @@ impl Shell {
         self.selected_mailbox = index;
         self.selection = Selection::new();
         self.reload(window, cx);
+    }
+
+    /// Select a message that may not be a row of the list — a collapsed row of the thread view
+    /// (E8.2) — and open it.
+    fn select_message(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        self.selection.select(id);
+        self.load_reading(window, cx);
+        cx.notify();
     }
 
     fn load_reading(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -224,6 +267,93 @@ impl Shell {
         .detach();
     }
 
+    /// The width to lay HTML out at now: the measured pane width, or the default before the pane
+    /// has been measured. Every `layout_document` call uses this, so they cannot disagree.
+    fn html_layout_width(&self) -> f32 {
+        self.html_width
+            .unwrap_or(snail_ui::layout::DEFAULT_DOCUMENT_WIDTH)
+    }
+
+    /// Record the reading pane's content width, measured during prepaint, and schedule a relayout
+    /// if the open HTML message was laid out at a different width.
+    ///
+    /// The first measurement relays out on the next frame, so the first HTML message after launch
+    /// is not shown at the default width for the length of the debounce. Every later change —
+    /// a window resize, the list collapsing — waits for the width to hold still.
+    fn note_html_pane_width(&mut self, content_width: f32, cx: &mut Context<Self>) {
+        use snail_ui::layout::{document_width, width_changed};
+        let width = document_width(content_width);
+        let previous = self.html_width.replace(width);
+        if previous.is_some_and(|previous| !width_changed(previous, width)) {
+            // Unchanged since the last frame: leave any pending relayout to fire. Re-arming it
+            // here would let a steady stream of frames postpone it forever.
+            return;
+        }
+        let stale = matches!(
+            &self.reading,
+            Some(Reading { body: BodyKind::Html { view, .. }, .. })
+                if width_changed(view.width(), width)
+        );
+        if !stale {
+            // Resized back to the width already laid out: nothing to do.
+            self.html_relayout = None;
+            return;
+        }
+        let delay = if previous.is_some() {
+            HTML_RELAYOUT_DEBOUNCE
+        } else {
+            std::time::Duration::ZERO
+        };
+        self.html_relayout = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            this.update(cx, |this, cx| {
+                this.html_relayout_due = true;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// Lay the open HTML message out again at the current pane width, if it is not already. Runs in
+    /// render, once the debounce has fired.
+    fn apply_pending_relayout(&mut self, window: &mut Window, cx: &mut App) {
+        if !std::mem::take(&mut self.html_relayout_due) {
+            return;
+        }
+        self.html_relayout = None;
+        let width = self.html_layout_width();
+        let Some(Reading {
+            body:
+                BodyKind::Html {
+                    document,
+                    view,
+                    images,
+                    quotes_collapsed,
+                    ..
+                },
+            ..
+        }) = &mut self.reading
+        else {
+            return;
+        };
+        if !snail_ui::layout::width_changed(view.width(), width) {
+            return;
+        }
+        let selection = view.selection();
+        match crate::html_view::layout_document(
+            document,
+            width,
+            window,
+            images,
+            Some(selection),
+            !*quotes_collapsed,
+            cx,
+        ) {
+            Ok(updated) => *view = updated,
+            Err(error) => log::warn!("could not re-lay out the message at {width}px: {error:?}"),
+        }
+    }
+
     /// Turn fetched remote images into gpui images and re-lay out the reading pane. Runs in render,
     /// where the window is available for text metrics.
     fn apply_pending_images(&mut self, window: &mut Window, cx: &mut App) {
@@ -231,6 +361,7 @@ impl Shell {
             return;
         }
         let pending = std::mem::take(&mut self.pending_remote);
+        let width = self.html_layout_width();
         let generation = self.generation;
         let mut applied = 0;
         if let Some(Reading {
@@ -257,7 +388,7 @@ impl Shell {
             let selection = view.selection();
             if let Ok(updated) = crate::html_view::layout_document(
                 document,
-                640.0,
+                width,
                 window,
                 images,
                 Some(selection),
@@ -284,12 +415,11 @@ impl Shell {
                     Some(raw) => crate::html_view::Images::from_message(&raw),
                     None => crate::html_view::Images::default(),
                 };
-                // 640px is roughly the reading pane's content width at the default window size.
                 let document = crate::html_view::prepare_document(&html);
                 let has_quotes = crate::html_view::has_quoted_content(&document);
                 match crate::html_view::layout_document(
                     &document,
-                    640.0,
+                    self.html_layout_width(),
                     window,
                     &images,
                     None,
@@ -337,6 +467,7 @@ impl Shell {
     }
 
     fn expand_quotes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let width = self.html_layout_width();
         let Some(reading) = &mut self.reading else {
             return;
         };
@@ -352,7 +483,7 @@ impl Shell {
                 let selection = view.selection();
                 match crate::html_view::layout_document(
                     document,
-                    640.0,
+                    width,
                     window,
                     images,
                     Some(selection),
@@ -676,29 +807,30 @@ impl Shell {
         cx: &App,
     ) -> AnyElement {
         let id = row.id;
-        let sender = row
-            .from_name
-            .clone()
-            .or_else(|| row.from_addr.clone())
-            .unwrap_or_else(|| "(unknown)".into());
-        let subject = row.subject.clone().unwrap_or_else(|| "(no subject)".into());
-        let preview = row.preview.clone().unwrap_or_default();
+        // Each field is one flowing paragraph; GPUI wraps and clamps it at the row's real width.
+        let single_line = snail_ui::preview::single_line;
+        let sender = single_line(
+            row.from_name
+                .as_deref()
+                .or(row.from_addr.as_deref())
+                .unwrap_or("(unknown)"),
+        );
+        let subject = single_line(row.subject.as_deref().unwrap_or("(no subject)"));
+        let preview = single_line(row.preview.as_deref().unwrap_or_default());
         let unread = row.unread;
-        let subject = snail_ui::preview::clamp(&subject, 1, 300.0, &|line| {
-            line.chars().count() as f32 * 7.0
-        });
-        let preview = snail_ui::preview::clamp(&preview, 2, 300.0, &|line| {
-            line.chars().count() as f32 * 6.5
-        });
 
         let base = div()
             .relative()
             .w_full()
-            .h(px(ROW_HEIGHT))
+            // Tall enough for its own text (derived from the text roles), so clipping it below can
+            // only ever trim what the clamps have already cut.
+            .h(px(snail_ui::text::message_row_height()))
+            // Nothing a row draws may reach the next one.
+            .overflow_hidden()
             .flex()
             .gap_2()
             .px_4()
-            .py_3()
+            .py(px(snail_ui::text::MESSAGE_ROW_PADDING_Y))
             .border_b_1()
             .border_color(style::color(palette.colors.border_hairline))
             .when(selected, |this| {
@@ -739,32 +871,120 @@ impl Shell {
                 .flex_col()
                 .flex_1()
                 .min_w_0()
-                .gap_1()
-                .child(style::text(
-                    sender,
-                    if unread {
-                        TextRole::RowSenderUnread
-                    } else {
-                        TextRole::RowSenderRead
-                    },
-                    cx,
-                ))
-                .child(style::text(
-                    subject,
-                    if unread {
-                        TextRole::RowSubjectUnread
-                    } else {
-                        TextRole::RowSubjectRead
-                    },
-                    cx,
-                ))
-                .child(style::text(preview, TextRole::RowPreview, cx)),
+                .gap(px(snail_ui::text::MESSAGE_ROW_GAP))
+                .child(
+                    style::text(
+                        sender,
+                        if unread {
+                            TextRole::RowSenderUnread
+                        } else {
+                            TextRole::RowSenderRead
+                        },
+                        cx,
+                    )
+                    .truncate(),
+                )
+                .child(
+                    style::text(
+                        subject,
+                        if unread {
+                            TextRole::RowSubjectUnread
+                        } else {
+                            TextRole::RowSubjectRead
+                        },
+                        cx,
+                    )
+                    .truncate(),
+                )
+                // Two lines with an ellipsis, measured on the shaped text — including a long URL,
+                // which wraps at character boundaries rather than overflowing (E5.3).
+                .child(
+                    style::text(preview, TextRole::RowPreview, cx)
+                        .line_clamp(2)
+                        .text_ellipsis(),
+                ),
         )
         .into_any_element()
     }
 
-    fn compose_reply(&mut self, all: bool, cx: &mut Context<Self>) {
+    /// Apply a triage action to the whole selection (E8.4/E8.7) and arm the undo bar (E8.5).
+    fn triage_selection(
+        &mut self,
+        action: snail_core::triage::TriageAction,
+        label: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ids = self.selection.selected_ids();
+        let ops: Vec<i64> = ids
+            .iter()
+            .filter_map(|id| self.mail.triage(*id, &action))
+            .collect();
+        if !ops.is_empty() {
+            self.undo = Some(UndoBar {
+                ops,
+                label: label.to_string(),
+                at: Instant::now(),
+            });
+        }
+        self.reload(window, cx);
+        cx.notify();
+    }
+
+    /// Toggle read/unread on the selection (E8.4).
+    fn toggle_read(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.selection.cursor() else {
+            return;
+        };
+        let unread = self.mail.message(id).map(|row| row.unread).unwrap_or(false);
+        self.triage_selection(
+            snail_core::triage::TriageAction::MarkRead(unread),
+            if unread { "Marked read" } else { "Marked unread" },
+            window,
+            cx,
+        );
+    }
+
+    /// Conversation-level archive: every message in the cursor's thread (E8.8).
+    fn archive_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(message_id) = self.selection.cursor() else {
+            return;
+        };
+        let Some(thread_id) = self.mail.thread_id_of(message_id) else {
+            return;
+        };
+        let ids: Vec<i64> = self
+            .mail
+            .thread_messages(thread_id)
+            .iter()
+            .map(|row| row.id)
+            .collect();
+        let ops: Vec<i64> = ids
+            .iter()
+            .filter_map(|id| self.mail.triage(*id, &snail_core::triage::TriageAction::Archive))
+            .collect();
+        if !ops.is_empty() {
+            self.undo = Some(UndoBar {
+                ops,
+                label: "Conversation archived".into(),
+                at: Instant::now(),
+            });
+        }
+        self.reload(window, cx);
+        cx.notify();
+    }
+
+    fn undo_last(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(bar) = self.undo.take() {
+            for op in bar.ops {
+                self.mail.undo_triage(op);
+            }
+        }
+        self.reload(window, cx);
+        cx.notify();
+    }
+
+    fn compose_reply(&mut self, all: bool, cx: &mut Context<Self>) {        let Some(id) = self.selection.cursor() else {
             return;
         };
         let Some(parsed) = self.mail.parsed(id) else {
@@ -787,6 +1007,127 @@ impl Shell {
         };
         let draft = snail_core::compose::forward(&parsed);
         crate::compose::open(self.mail.clone(), draft, cx);
+    }
+
+    /// The conversation strip above an open message when its thread has siblings (E8.2): the
+    /// thread subject, its mailbox, the participant list and the count, then the *other* messages
+    /// collapsed to name, snippet and date. The open message stays expanded below; a collapsed row
+    /// opens that message in place. Roles come from `snail-ui::text`, so no size or hex is here.
+    fn thread_strip(
+        &self,
+        palette: &snail_ui::theme::Theme,
+        thread: &[MessageRow],
+        mailbox: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let cursor = self.selection.cursor();
+        let mut seen = std::collections::HashSet::new();
+        let mut participants: Vec<String> = Vec::new();
+        for message in thread {
+            let name = message
+                .from_name
+                .clone()
+                .or_else(|| message.from_addr.clone())
+                .unwrap_or_default();
+            if !name.is_empty() && seen.insert(name.clone()) {
+                participants.push(name);
+            }
+        }
+        let subject = thread
+            .iter()
+            .rev()
+            .find_map(|message| message.subject.clone())
+            .unwrap_or_else(|| "(no subject)".into());
+
+        let mut strip = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .px_6()
+            .py_4()
+            .bg(style::color(palette.colors.sunken))
+            .border_b_1()
+            .border_color(style::color(palette.colors.border_hairline))
+            .child(style::text(subject, TextRole::ThreadSubject, cx))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .when_some(mailbox, |this, mailbox| {
+                        this.child(
+                            div()
+                                .px_2()
+                                .py(px(1.0))
+                                .rounded(px(palette.radii.chip))
+                                .bg(style::color(palette.colors.accent_tint_deep))
+                                .child(style::text(mailbox, TextRole::MailboxPill, cx)),
+                        )
+                    })
+                    .child(style::text(
+                        format!("{} messages", thread.len()),
+                        TextRole::ReadingMeta,
+                        cx,
+                    ))
+                    .child(style::text(participants.join(", "), TextRole::ReadingMeta, cx)),
+            );
+
+        for message in thread {
+            if Some(message.id) == cursor {
+                continue;
+            }
+            let id = message.id;
+            let sender = snail_ui::preview::single_line(
+                message
+                    .from_name
+                    .as_deref()
+                    .or(message.from_addr.as_deref())
+                    .unwrap_or("(unknown)"),
+            );
+            let snippet =
+                snail_ui::preview::single_line(message.preview.as_deref().unwrap_or_default());
+            strip = strip.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .px_3()
+                    .py_2()
+                    .rounded(px(palette.radii.button))
+                    .hover(|this| this.bg(style::color(palette.colors.card)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _event, window, cx| {
+                            this.select_message(id, window, cx);
+                        }),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(28.0))
+                            .h(px(28.0))
+                            .rounded_full()
+                            .bg(style::color(palette.colors.accent_tint_deep))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(style::text(initials(&sender), TextRole::MailboxPill, cx)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .child(style::text(sender, TextRole::CollapsedSender, cx))
+                            .child(style::text(snippet, TextRole::CollapsedSnippet, cx)),
+                    )
+                    .child(style::text(short_date(message.date), TextRole::CollapsedDate, cx)),
+            );
+        }
+        strip.into_any_element()
     }
 
     fn reading_pane(&self, palette: &snail_ui::theme::Theme, cx: &mut Context<Self>) -> AnyElement {        let Some(reading) = &self.reading else {
@@ -832,6 +1173,24 @@ impl Shell {
                 .hover(|this| this.bg(style::color(palette.colors.sunken)))
                 .child(label.to_string())
         };
+        // The conversation, if this message has siblings (E8.2). Computed before the body so the
+        // strip is the first child and the open message is the expanded one below it.
+        let thread = self
+            .selection
+            .cursor()
+            .and_then(|id| self.mail.thread_id_of(id))
+            .map(|thread_id| self.mail.thread_messages(thread_id))
+            .unwrap_or_default();
+        let strip = (thread.len() > 1).then(|| {
+            self.thread_strip(
+                palette,
+                &thread,
+                self.mailboxes
+                    .get(self.selected_mailbox)
+                    .map(|mailbox| mailbox.name.clone()),
+                cx,
+            )
+        });
         div()
             .flex_1()
             .min_w_0()
@@ -839,6 +1198,7 @@ impl Shell {
             .flex()
             .flex_col()
             .bg(style::color(palette.colors.canvas))
+            .when_some(strip, |this, strip| this.child(strip))
             .child(
                 div()
                     .flex()
@@ -951,6 +1311,24 @@ impl Shell {
                     .track_scroll(&self.reading_scroll)
                     .px_6()
                     .py_5()
+                    // Measures the content box — the width inside the padding — as it is laid
+                    // out this frame, so HTML uses the pane's real width. Zero height, so it takes
+                    // no space; full width in this block container, so it spans exactly that box.
+                    .child({
+                        let shell = cx.entity().downgrade();
+                        canvas(
+                            move |bounds, _window, cx| {
+                                shell
+                                    .update(cx, |this, cx| {
+                                        this.note_html_pane_width(bounds.size.width.into(), cx)
+                                    })
+                                    .ok();
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .w_full()
+                        .h(px(0.0))
+                    })
                     .child(
                         div()
                             .flex()
@@ -1149,6 +1527,28 @@ fn plain_body(text: String) -> BodyKind {
     }
 }
 
+fn short_date(epoch: Option<i64>) -> String {
+    let Some(epoch) = epoch else {
+        return String::new();
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0);
+    let delta = now - epoch;
+    if delta < 60 {
+        "now".into()
+    } else if delta < 3600 {
+        format!("{}m", delta / 60)
+    } else if delta < 86_400 {
+        format!("{}h", delta / 3600)
+    } else if delta < 7 * 86_400 {
+        format!("{}d", delta / 86_400)
+    } else {
+        format!("{}w", delta / (7 * 86_400))
+    }
+}
+
 fn initials(name: &str) -> String {
     name.split_whitespace()
         .filter_map(|word| word.chars().next())
@@ -1161,6 +1561,24 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Apply any remote images that arrived since the last frame, then re-lay out (E6.8).
         self.apply_pending_images(window, cx);
+        self.apply_pending_relayout(window, cx);
+        // The undo bar auto-expires (E8.5): keep ticking while it is up, then clear it.
+        if let Some(bar) = &self.undo {
+            if bar.at.elapsed() >= Duration::from_secs(6) {
+                self.undo = None;
+            } else {
+                cx.on_next_frame(window, |this, _window, cx| {
+                    if this
+                        .undo
+                        .as_ref()
+                        .is_some_and(|bar| bar.at.elapsed() >= Duration::from_secs(6))
+                    {
+                        this.undo = None;
+                    }
+                    cx.notify();
+                });
+            }
+        }
         let palette = style::palette(cx);
 
         let overlay = if self.overlay.visible {
@@ -1191,6 +1609,11 @@ impl Render for Shell {
         };
 
         let ids: Vec<i64> = self.rows.iter().map(|row| row.id).collect();
+        let undo_label = self
+            .undo
+            .as_ref()
+            .filter(|bar| bar.at.elapsed() < Duration::from_secs(6))
+            .map(|bar| bar.label.clone());
         div()
             .relative()
             .size_full()
@@ -1200,6 +1623,7 @@ impl Render for Shell {
             .text_color(style::color(palette.colors.ink))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                let modifiers = event.keystroke.modifiers;
                 match event.keystroke.key.as_str() {
                     "f2" => this.overlay.toggle(),
                     "f3" => {
@@ -1231,6 +1655,26 @@ impl Render for Shell {
                     "c" => crate::compose::open(this.mail.clone(), Default::default(), cx),
                     "r" => this.compose_reply(event.keystroke.modifiers.shift, cx),
                     "f" => this.compose_forward(cx),
+                    // Triage (E8): Cmd+Shift+A archive, Cmd+Backspace trash, e archives the
+                    // conversation, u toggles read, g toggles thread grouping.
+                    "a" if modifiers.platform && modifiers.shift => this.triage_selection(
+                        snail_core::triage::TriageAction::Archive,
+                        "Archived",
+                        window,
+                        cx,
+                    ),
+                    "backspace" if modifiers.platform => this.triage_selection(
+                        snail_core::triage::TriageAction::Trash,
+                        "Trashed",
+                        window,
+                        cx,
+                    ),
+                    "e" => this.archive_thread(window, cx),
+                    "u" => this.toggle_read(window, cx),
+                    "g" => {
+                        this.group_threads = !this.group_threads;
+                        this.reload(window, cx);
+                    }
                     _ => return,
                 }
                 cx.notify();
@@ -1246,5 +1690,40 @@ impl Render for Shell {
                     .child(self.reading_pane(palette, cx)),
             )
             .when_some(overlay, |this, overlay| this.child(overlay))
+            .when_some(undo_label, |this, label| {
+                this.child(
+                    div()
+                        .absolute()
+                        .bottom(px(16.0))
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .px_4()
+                                .py_2()
+                                .rounded(px(palette.radii.card))
+                                .bg(style::color(palette.colors.ink))
+                                .text_color(style::color(palette.colors.canvas))
+                                .text_size(px(12.0))
+                                .child(label)
+                                .child(
+                                    div()
+                                        .text_color(style::color(palette.colors.accent))
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, window, cx| {
+                                                this.undo_last(window, cx)
+                                            }),
+                                        )
+                                        .child("Undo"),
+                                ),
+                        ),
+                )
+            })
     }
 }

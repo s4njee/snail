@@ -12,3 +12,4 @@ pub mod preview;
 pub mod selection;
 pub mod text;
 pub mod theme;
+pub mod threads;

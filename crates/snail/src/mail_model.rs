@@ -63,6 +63,35 @@ impl MailModel {
             .map(|account| account.address.clone())
     }
 
+    /// Apply a triage action optimistically and queue it (E8.4). Returns the op id for undo.
+    pub fn triage(
+        &self,
+        message_id: i64,
+        action: &snail_core::triage::TriageAction,
+    ) -> Option<i64> {
+        let now = now_epoch();
+        let key = format!("{}:{}:{now}", action.operation(), message_id);
+        self.store.apply_triage(message_id, action, &key, now).ok()
+    }
+
+    /// Undo a triage op (E8.5): restore the row and cancel or invert the queued op.
+    pub fn undo_triage(&self, op_id: i64) -> bool {
+        self.store.undo_triage(op_id, now_epoch()).unwrap_or(false)
+    }
+
+    pub fn thread_id_of(&self, message_id: i64) -> Option<i64> {
+        self.store.thread_id_of(message_id).ok().flatten()
+    }
+
+    pub fn thread_messages(&self, thread_id: i64) -> Vec<MessageRow> {
+        self.store.messages_in_thread(thread_id).unwrap_or_default()
+    }
+
+    /// One row per thread, for the "group by thread" list (E8.3).
+    pub fn thread_page(&self, mailbox_id: i64, limit: u32) -> Vec<snail_core::store::ThreadRow> {
+        self.store.thread_page(mailbox_id, limit).unwrap_or_default()
+    }
+
     /// Address autocomplete from the harvested contacts (E7.3).
     pub fn suggest_contacts(&self, prefix: &str, limit: u32) -> Vec<snail_core::store::ContactRow> {
         let Some(account_id) = self.first_account_id() else {
