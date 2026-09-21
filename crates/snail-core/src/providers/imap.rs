@@ -24,6 +24,18 @@ impl MailboxKind {
             MailboxKind::Other => "other",
         }
     }
+
+    /// The name the five fixed mailboxes carry in the UI and the store.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            MailboxKind::Inbox => "Inbox",
+            MailboxKind::Sent => "Sent",
+            MailboxKind::Drafts => "Drafts",
+            MailboxKind::Archive => "Archive",
+            MailboxKind::Trash => "Trash",
+            MailboxKind::Other => "Other",
+        }
+    }
 }
 
 /// Map a folder **name** (E4.18). iCloud advertises SPECIAL-USE for only `\Sent` and `\Trash`

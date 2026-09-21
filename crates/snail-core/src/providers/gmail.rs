@@ -5,6 +5,8 @@
 
 use serde_json::Value;
 
+use super::imap::MailboxKind;
+
 /// Google silently disables compression without the literal string `gzip` in the User-Agent (E4.9).
 pub const USER_AGENT: &str = "snail/0.1 (gzip) (gmail)";
 
@@ -274,6 +276,49 @@ pub fn backfill_query(days: u32) -> String {
     format!("newer_than:{days}d")
 }
 
+/// Minimal metadata: enough to know a message's thread and labels without paying for a body.
+pub fn message_meta_url(id: &str) -> String {
+    format!("{BASE}/messages/{id}?format=minimal")
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MessageMeta {
+    pub id: String,
+    pub thread_id: Option<String>,
+    pub label_ids: Vec<String>,
+}
+
+pub fn parse_message_meta(json: &Value) -> MessageMeta {
+    MessageMeta {
+        id: json.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
+        thread_id: json.get("threadId").and_then(Value::as_str).map(str::to_string),
+        label_ids: json
+            .get("labelIds")
+            .and_then(Value::as_array)
+            .map(|values| strings(values))
+            .unwrap_or_default(),
+    }
+}
+
+/// Gmail's labels → the handoff's five mailboxes (E8.6). Archive is the interesting one: it is
+/// "none of the system folders" rather than a label of its own.
+pub fn mailbox_kind_for_labels(labels: &[String]) -> MailboxKind {
+    let has = |name: &str| labels.iter().any(|label| label.eq_ignore_ascii_case(name));
+    if has("TRASH") {
+        MailboxKind::Trash
+    } else if has("SPAM") {
+        MailboxKind::Other
+    } else if has("DRAFT") {
+        MailboxKind::Drafts
+    } else if has("SENT") {
+        MailboxKind::Sent
+    } else if has("INBOX") {
+        MailboxKind::Inbox
+    } else {
+        MailboxKind::Archive
+    }
+}
+
 /// Gmail's `raw` field: standard base64url, occasionally padded.
 pub fn encode_raw(raw: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(raw)
@@ -330,6 +375,10 @@ impl GmailClient {
     }
 
     fn get_json(&self, url: &str) -> Result<Value, GmailError> {
+        self.with_retry(|| self.get_json_once(url))
+    }
+
+    fn get_json_once(&self, url: &str) -> Result<Value, GmailError> {
         let response = self.get(url)?.send().map_err(|error| GmailError {
             kind: ApiError::Other,
             status: 0,
@@ -339,6 +388,10 @@ impl GmailClient {
     }
 
     fn post_json(&self, url: &str, body: Value) -> Result<Value, GmailError> {
+        self.with_retry(|| self.post_json_once(url, body.clone()))
+    }
+
+    fn post_json_once(&self, url: &str, body: Value) -> Result<Value, GmailError> {
         let token = self
             .tokens
             .access_token()
@@ -363,6 +416,38 @@ impl GmailClient {
         read_json(response)
     }
 
+    /// Retry only the retryable class — 403 `usageLimits`, 429, 5xx (E4.8). Terminal errors
+    /// (`domainPolicy`, auth) return at once. The per-user quota is shared with the user's phone,
+    /// so a backfill must expect to be throttled and wait it out (E16.4).
+    fn with_retry<T>(
+        &self,
+        mut attempt_fn: impl FnMut() -> Result<T, GmailError>,
+    ) -> Result<T, GmailError> {
+        let mut delay = Duration::from_millis(1000);
+        let mut last: Option<GmailError> = None;
+        for attempt in 0..6 {
+            match attempt_fn() {
+                Ok(value) => return Ok(value),
+                Err(error) if error.kind == ApiError::Retryable && attempt < 5 => {
+                    log::warn!(
+                        "Gmail throttled ({}); retrying in {:?}",
+                        error.message,
+                        delay
+                    );
+                    std::thread::sleep(delay);
+                    delay = (delay * 2).min(Duration::from_secs(32));
+                    last = Some(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last.unwrap_or(GmailError {
+            kind: ApiError::Retryable,
+            status: 0,
+            message: "exhausted retries".into(),
+        }))
+    }
+
     pub fn profile(&self) -> Result<Profile> {
         let json = self.get_json(&profile_url())?;
         Ok(parse_profile(&json))
@@ -385,6 +470,11 @@ impl GmailClient {
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("message {id} had no raw field"))?;
         decode_raw(encoded)
+    }
+
+    pub fn message_meta(&self, id: &str) -> Result<MessageMeta> {
+        let json = self.get_json(&message_meta_url(id))?;
+        Ok(parse_message_meta(&json))
     }
 
     /// Backfill the last `days` days, **head first** (E4.2), committing the cursor only after the
@@ -424,15 +514,25 @@ impl GmailClient {
             if store.gmail_message_exists(account_id, id)? {
                 continue;
             }
+            // Metadata gives the thread and the labels the raw fetch does not carry (E4.7/E8.6).
+            let meta = self.message_meta(id)?;
+            let kind = mailbox_kind_for_labels(&meta.label_ids);
+            let resolved_mailbox = match mailbox_id {
+                Some(id) => id,
+                None => store.ensure_mailbox(account_id, kind.display_name(), kind.as_str())?,
+            };
+            let thread_id = store.ensure_thread(account_id, meta.thread_id.as_deref(), None)?;
+
             let raw = self.raw_message(id)?;
             let parsed = mime::parse_raw(&raw).with_context(|| format!("parse message {id}"))?;
             let raw_hash = store.cache().put(&raw)?;
             let message = NewMessage {
                 account_id,
-                mailbox_id,
+                mailbox_id: Some(resolved_mailbox),
+                thread_id: Some(thread_id),
                 provider: Some(ProviderRef::Gmail {
                     id: id.clone(),
-                    thread_id: None,
+                    thread_id: meta.thread_id.clone(),
                     history_id: None,
                 }),
                 message_id: parsed.message_id,
@@ -444,14 +544,25 @@ impl GmailClient {
                 to_json: Some(serde_json::to_string(&parsed.to)?),
                 date: parsed.date,
                 preview: parsed.preview,
-                unread: true,
+                unread: meta.label_ids.iter().any(|label| label == "UNREAD"),
                 raw_hash: Some(raw_hash),
+                labels_json: Some(serde_json::to_string(&meta.label_ids)?),
                 ..Default::default()
             };
             if store.insert_message_if_new(&message)? {
                 inserted += 1;
             }
         }
+        // Keep the mailbox counters honest after a batch (E5.9 reads them).
+        store.with_db(|conn| {
+            conn.execute(
+                "UPDATE mailbox SET
+                    total = (SELECT count(*) FROM message WHERE message.mailbox_id = mailbox.id),
+                    unread = (SELECT count(*) FROM message WHERE message.mailbox_id = mailbox.id AND message.unread = 1)",
+                [],
+            )?;
+            Ok(())
+        })?;
 
         // 4. Commit the head only now.
         store.set_sync_state(&SyncState {
@@ -673,6 +784,28 @@ mod tests {
     #[test]
     fn the_backfill_window_is_the_last_thirty_days() {
         assert_eq!(backfill_query(30), "newer_than:30d");
+    }
+
+    #[test]
+    fn gmail_labels_map_to_the_five_mailboxes() {
+        let labels = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(mailbox_kind_for_labels(&labels(&["INBOX", "UNREAD"])), MailboxKind::Inbox);
+        assert_eq!(mailbox_kind_for_labels(&labels(&["SENT"])), MailboxKind::Sent);
+        assert_eq!(mailbox_kind_for_labels(&labels(&["DRAFT"])), MailboxKind::Drafts);
+        assert_eq!(mailbox_kind_for_labels(&labels(&["TRASH"])), MailboxKind::Trash);
+        // Archive is the absence of every system folder (E8.6).
+        assert_eq!(mailbox_kind_for_labels(&labels(&["STARRED", "IMPORTANT"])), MailboxKind::Archive);
+        assert_eq!(mailbox_kind_for_labels(&labels(&[])), MailboxKind::Archive);
+        // Trash wins over a still-present INBOX.
+        assert_eq!(mailbox_kind_for_labels(&labels(&["INBOX", "TRASH"])), MailboxKind::Trash);
+    }
+
+    #[test]
+    fn message_meta_parses_thread_and_labels() {
+        let meta = parse_message_meta(&json!({"id": "m1", "threadId": "t1", "labelIds": ["INBOX", "UNREAD"]}));
+        assert_eq!(meta.id, "m1");
+        assert_eq!(meta.thread_id.as_deref(), Some("t1"));
+        assert_eq!(meta.label_ids, vec!["INBOX", "UNREAD"]);
     }
 
     #[test]

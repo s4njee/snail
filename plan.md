@@ -748,13 +748,12 @@ boundary sits above this epic.*
 *Two implementations behind one `MailProvider` trait. All of it in `snail-core`, driven by
 `snail-services`, invisible to every view.*
 
-*Implemented so far: the `MailProvider` trait (4.1), MIME parsing (4.22), Gmail's pure logic —
-`threads.get?format=raw` (4.3), history record parsing and the cursor discipline (4.4–4.6),
-rate-limit/error classification (4.8), the gzip User-Agent (4.9) — iCloud folder mapping (4.18), and
-the **live Gmail REST client and backfill**, proven end to end on 2026-09-21: 669,881-message
-account, 100 messages of the last 30 days enumerated and inserted, head taken before enumerating
-(4.2), 9.5 MB of raw MIME cached. Remaining: filing each message into a mailbox from its labels (the
-raw fetch carries none), history records applied to the store (4.7), the IMAP client
+*Implemented: the `MailProvider` trait (4.1), MIME parsing (4.22), Gmail's pure logic (4.3–4.6, 4.8,
+4.9), iCloud folder mapping (4.18), and the **live Gmail REST client and backfill**, proven end to
+end on 2026-09-21: a 669,883-message account, 150 messages of the last 30 days **filed into
+Inbox/Sent by their Gmail labels** with threads and mailbox counters, raw MIME cached, head taken
+before enumerating (4.2), and retry-with-backoff surviving a **real per-user quota 403** (4.8/E16.4).
+Remaining: applying history records incrementally to the store (4.7), the IMAP client
 (4.10–4.17, 4.19–4.21), SMTP send, and the kill-safety tests (4.23/4.24).*
 
 **Gmail (REST):**

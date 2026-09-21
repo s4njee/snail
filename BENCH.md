@@ -37,3 +37,14 @@ before enumeration per E4.2. **9.5 MB** of raw MIME in the content-addressed cac
 
 **Gap found and stated:** the raw fetch carries no labels, so backfilled messages have no mailbox
 yet; filing by label is the sync loop's job (E4.7/E8.6).
+
+## E4 — label → mailbox filing, 2026-09-21
+
+After adding `messages.get?format=minimal` for labels + thread, `--backfill-gmail --limit 150` on the
+real account: **150/150 inserted, Inbox 149 (113 unread), Sent 1, 148 threads**. Gmail's archive is
+"none of the system folders" (E8.6), and trash wins over a still-present INBOX.
+
+**A real quota 403 fired** on a back-to-back run (`403 usageLimits`, "Units per minute per user"),
+correctly classified retryable. The first version aborted; it now retries with exponential backoff
+(1s → 32s) and the re-run completed. The per-user quota is shared with the user's phone (E16.4), so
+this is the normal case, not an exception.

@@ -47,6 +47,7 @@ pub struct NewMessage {
     pub unread: bool,
     pub body_hash: Option<String>,
     pub raw_hash: Option<String>,
+    pub labels_json: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -254,10 +255,10 @@ impl Store {
                     imap_uid, imap_uidvalidity, imap_modseq,
                     message_id, in_reply_to, references_header,
                     subject, from_name, from_addr, to_json, date,
-                    preview, unread, body_hash, raw_hash
+                    preview, unread, body_hash, raw_hash, labels_json
                  ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                    ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
+                    ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23
                  )",
                 params![
                     message.account_id,
@@ -282,9 +283,72 @@ impl Store {
                     message.unread as i64,
                     message.body_hash,
                     message.raw_hash,
+                    message.labels_json,
                 ],
             )?;
             Ok(conn.last_insert_rowid())
+        })
+    }
+
+    /// Create a mailbox if it is not there and return its id (used by backfill/sync).
+    pub fn ensure_mailbox(&self, account_id: i64, name: &str, kind: &str) -> Result<i64> {
+        self.with_db(|conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO mailbox (account_id, name, kind) VALUES (?1, ?2, ?3)",
+                params![account_id, name, kind],
+            )?;
+            Ok(conn.query_row(
+                "SELECT id FROM mailbox WHERE account_id = ?1 AND name = ?2",
+                params![account_id, name],
+                |row| row.get(0),
+            )?)
+        })
+    }
+
+    /// The thread a message belongs to, created on first sight (Gmail's `threadId` is authoritative).
+    pub fn ensure_thread(
+        &self,
+        account_id: i64,
+        provider_thread_id: Option<&str>,
+        subject: Option<&str>,
+    ) -> Result<i64> {
+        self.with_db(|conn| {
+            if let Some(provider_id) = provider_thread_id {
+                use rusqlite::OptionalExtension as _;
+                let existing: Option<i64> = conn
+                    .query_row(
+                        "SELECT id FROM thread WHERE account_id = ?1 AND provider_thread_id = ?2",
+                        params![account_id, provider_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if let Some(id) = existing {
+                    return Ok(id);
+                }
+                conn.execute(
+                    "INSERT INTO thread (account_id, provider_thread_id, subject) VALUES (?1, ?2, ?3)",
+                    params![account_id, provider_id, subject],
+                )?;
+                return Ok(conn.last_insert_rowid());
+            }
+            conn.execute(
+                "INSERT INTO thread (account_id, subject) VALUES (?1, ?2)",
+                params![account_id, subject],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+    }
+
+    pub fn mailbox_id(&self, account_id: i64, name: &str) -> Result<Option<i64>> {
+        self.with_db(|conn| {
+            use rusqlite::OptionalExtension as _;
+            Ok(conn
+                .query_row(
+                    "SELECT id FROM mailbox WHERE account_id = ?1 AND name = ?2",
+                    params![account_id, name],
+                    |row| row.get(0),
+                )
+                .optional()?)
         })
     }
 
