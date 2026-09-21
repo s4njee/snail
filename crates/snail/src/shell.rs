@@ -77,6 +77,12 @@ impl Shell {
             .map(|mailbox| self.mail.page(mailbox.id, PAGE))
             .unwrap_or_default();
         self.rows = Arc::new(rows);
+        log::info!(
+            "shell: {} mailboxes; {} messages in mailbox #{}",
+            self.mailboxes.len(),
+            self.rows.len(),
+            self.selected_mailbox
+        );
         let ids: Vec<i64> = self.rows.iter().map(|row| row.id).collect();
         self.selection.reconcile(&ids);
         if self.selection.cursor().is_none() {
@@ -318,14 +324,17 @@ impl Shell {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .child(uniform_list("message-list", count, move |range, _window, cx| {
-                        let palette = style::palette(cx);
-                        range
-                            .map(|index| {
-                                Self::row(palette, &rows[index], selection.is_selected(rows[index].id), cx)
-                            })
-                            .collect::<Vec<_>>()
-                    }))
+                    .child(
+                        uniform_list("message-list", count, move |range, _window, cx| {
+                            let palette = style::palette(cx);
+                            range
+                                .map(|index| {
+                                    Self::row(palette, &rows[index], selection.is_selected(rows[index].id), cx)
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .size_full(),
+                    )
                     .into_any_element()
             })
             .into_any_element()
