@@ -145,6 +145,7 @@ impl Shell {
             _ => Vec::new(),
         };
         if !urls.is_empty() {
+            log::info!("html: fetching {} remote image(s)", urls.len());
             self.fetch_remote(urls, cx);
         }
     }
@@ -171,6 +172,7 @@ impl Shell {
         });
         cx.spawn(async move |this, cx| {
             let fetched = task.await;
+            log::info!("remote: {} image(s) decoded", fetched.len());
             this.update(cx, |this, cx| {
                 this.pending_remote.extend(fetched);
                 cx.notify();
@@ -188,6 +190,7 @@ impl Shell {
         }
         let pending = std::mem::take(&mut self.pending_remote);
         let generation = self.generation;
+        let mut applied = 0;
         if let Some(Reading {
             body: BodyKind::Html { html, view, images },
             ..
@@ -199,8 +202,12 @@ impl Shell {
                 }
                 let render = crate::html_view::render_image(remote.width, remote.height, remote.bgra);
                 images.insert_remote(&remote.url, remote.width, remote.height, render);
+                applied += 1;
             }
             *view = crate::html_view::layout_html(html, 640.0, window, images);
+        }
+        if applied > 0 {
+            log::info!("remote: applied {applied} image(s)");
         }
     }
 

@@ -193,6 +193,18 @@ fn layout_block(
             radius: 0.0,
         });
     }
+    // A CSS background image sits above the colour and below the content (E6.8).
+    if let Some(src) = &style.background_image {
+        out.push(Fragment::Image {
+            rect: Rect {
+                x,
+                y: y + style.margin_top,
+                w: box_w,
+                h: total_h,
+            },
+            src: src.clone(),
+        });
+    }
     if style.border > 0.0 && style.background.is_some() {
         out.push(Fragment::Border {
             rect: Rect {
@@ -318,6 +330,17 @@ fn layout_table(
                     },
                     color: background,
                     radius: 0.0,
+                });
+            }
+            if let Some(src) = &cell.style.background_image {
+                out.push(Fragment::Image {
+                    rect: Rect {
+                        x: cell_x,
+                        y: cursor_y,
+                        w: width,
+                        h: height,
+                    },
+                    src: src.clone(),
                 });
             }
             if cell.style.border > 0.0 {

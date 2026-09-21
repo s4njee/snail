@@ -92,6 +92,18 @@ pub fn remote_image_urls(html: &str) -> Vec<String> {
         }
         cursor = start + end + 1;
     }
+    // CSS background images too (E6.8): `background-image: url(...)`.
+    let mut cursor = 0;
+    while let Some(found) = lower[cursor..].find("url(") {
+        let start = cursor + found + 4;
+        let rest = html[start..].trim_start().trim_start_matches(['"', '\'']);
+        let end = rest.find(['"', '\'', ')']).unwrap_or(rest.len());
+        let value = &rest[..end];
+        if value.starts_with("http://") || value.starts_with("https://") {
+            out.push(value.to_string());
+        }
+        cursor = start + end + 1;
+    }
     out.sort();
     out.dedup();
     out
@@ -153,6 +165,10 @@ pub fn paint(view: &HtmlView, images: &Images) -> AnyElement {
         .relative()
         .w(px(view.width))
         .h(px(view.height))
+        // Email is authored for white paper; give the document its own ground so a dark app theme
+        // does not turn every message black.
+        .bg(rgb(0xffffff))
+        .text_color(rgb(0x241f1b))
         .children(view.fragments.iter().map(|fragment| paint_fragment(fragment, images)))
         .into_any_element()
 }
@@ -190,6 +206,8 @@ fn paint_fragment(fragment: &Fragment, images: &Images) -> AnyElement {
             .absolute()
             .left(px(*x))
             .top(px(*y))
+            // Same family as the measurer, or the laid-out widths and the painted glyphs disagree.
+            .font_family("Helvetica")
             .text_size(px(font.size))
             .text_color(rgba(to_u32(*color)))
             .font_weight(if font.bold {
@@ -256,7 +274,7 @@ fn sanitize(html: &str) -> String {
         "color", "background", "background-color", "font-size", "font-weight", "font-style",
         "text-decoration", "text-decoration-line", "text-align", "margin", "margin-top",
         "margin-bottom", "padding", "border", "border-width", "border-color", "width", "height",
-        "display",
+        "display", "background-image",
     ]
     .into_iter()
     .collect();

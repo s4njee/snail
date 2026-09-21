@@ -32,6 +32,8 @@ pub struct Style {
     pub display: Display,
     pub color: Color,
     pub background: Option<Color>,
+    /// A CSS `background-image: url(...)` (E6.8). Remote, so it obeys the same block/unblock rule.
+    pub background_image: Option<String>,
     pub font_size: f32,
     pub bold: bool,
     pub italic: bool,
@@ -54,6 +56,7 @@ impl Default for Style {
             display: Display::Block,
             color: [0x24, 0x1f, 0x1b, 0xff],
             background: None,
+            background_image: None,
             font_size: 15.0,
             bold: false,
             italic: false,
@@ -135,17 +138,11 @@ pub fn resolve_style(tag: &str, attrs: &HashMap<String, String>, parent: &Style)
             style.display = Display::Inline;
         }
         "br" | "hr" | "img" => style.display = Display::Inline,
-        "table" => {
-            style.display = Display::Table;
-            style.border = 1.0;
-        }
-        // Sections are pass-through: only rows are rows (collect_rows recurses into sections).
+        "table" => style.display = Display::Table,
         "thead" | "tbody" | "tfoot" => {}
         "tr" => style.display = Display::TableRow,
         "td" | "th" => {
             style.display = Display::TableCell;
-            style.padding = 6.0;
-            style.border = 1.0;
             if tag == "th" {
                 style.bold = true;
             }
@@ -179,6 +176,11 @@ pub fn resolve_style(tag: &str, attrs: &HashMap<String, String>, parent: &Style)
     }
     if let Some(px) = attrs.get("height").and_then(|v| parse_length(v)) {
         style.height = Some(px);
+    }
+    // A real `border` attribute still draws a border; the default is none (email tables are layout
+    // tables, and drawing a grid by default was wrong).
+    if let Some(border) = attrs.get("border").and_then(|v| v.trim().parse::<f32>().ok()) {
+        style.border = border;
     }
     if let Some(size) = attrs.get("size").and_then(|v| v.trim().parse::<f32>().ok()) {
         // <font size="1..7">, the legacy scale.
@@ -224,8 +226,19 @@ pub fn apply_inline_style(style: &mut Style, css: &str) {
                 }
             }
             "background" | "background-color" => {
-                if let Some(color) = parse_color(value) {
+                if let Some(url) = extract_url(value) {
+                    style.background_image = Some(url);
+                }
+                // The shorthand carries the colour among other tokens.
+                let color = parse_color(value)
+                    .or_else(|| value.split_whitespace().find_map(parse_color));
+                if let Some(color) = color {
                     style.background = Some(color);
+                }
+            }
+            "background-image" => {
+                if let Some(url) = extract_url(value) {
+                    style.background_image = Some(url);
                 }
             }
             "font-size" => {
@@ -327,6 +340,20 @@ pub fn parse_color(input: &str) -> Option<Color> {
     Some(named)
 }
 
+/// Extract the first `url(...)` target from a CSS value.
+pub fn extract_url(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    let start = lower.find("url(")? + 4;
+    let rest = &value[start..];
+    let end = rest.find(')')?;
+    let url = rest[..end].trim().trim_matches(['"', '\'']).trim();
+    if url.is_empty() {
+        None
+    } else {
+        Some(url.to_string())
+    }
+}
+
 /// Parse `12px`, `12`, `1.5em`, `9pt`. Percentages and unknown units return `None`.
 pub fn parse_length(input: &str) -> Option<f32> {
     let value = input.trim().to_ascii_lowercase();
@@ -391,6 +418,16 @@ mod tests {
         assert_eq!(parse_length("12px"), Some(12.0));
         assert_eq!(parse_length("9pt"), Some(12.0));
         assert_eq!(parse_length("50%"), None);
+    }
+
+    #[test]
+    fn background_image_urls_are_parsed() {
+        let mut style = Style::default();
+        apply_inline_style(&mut style, "background-image: url('https://x/y.png')");
+        assert_eq!(style.background_image.as_deref(), Some("https://x/y.png"));
+        apply_inline_style(&mut style, "background: #ffffff url(https://x/z.jpg) no-repeat");
+        assert_eq!(style.background_image.as_deref(), Some("https://x/z.jpg"));
+        assert_eq!(style.background, Some([255, 255, 255, 255]));
     }
 
     #[test]
