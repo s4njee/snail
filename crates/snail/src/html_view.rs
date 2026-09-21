@@ -14,7 +14,7 @@ use gpui_kit::*;
 use html5ever::tendril::TendrilSink;
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
-use snail_ui::html::{resolve_style, Element, FontSpec, Node, Style};
+use snail_ui::html::{apply_inline_style, resolve_style, Element, FontSpec, Node, Style};
 use snail_ui::layout::{self, Fragment, TextMeasure};
 
 /// A decoded inline image, with the size it should occupy.
@@ -224,12 +224,19 @@ fn sanitize(html: &str) -> String {
 }
 
 fn parse_to_dom(html: &str, images: &Images) -> Vec<Node> {
+    let sheet = parse_sheet(&extract_styles(html));
     let sanitized = sanitize(html);
     let dom = html5ever::parse_document(RcDom::default(), Default::default()).one(sanitized);
     let mut roots = Vec::new();
     let parent = Style::default();
     let body = find_body(&dom.document);
-    build_children(body.as_ref().unwrap_or(&dom.document), &parent, images, &mut roots);
+    build_children(
+        body.as_ref().unwrap_or(&dom.document),
+        &parent,
+        images,
+        &sheet,
+        &mut roots,
+    );
     roots
 }
 
@@ -247,7 +254,13 @@ fn find_body(handle: &Handle) -> Option<Handle> {
     None
 }
 
-fn build_children(handle: &Handle, parent: &Style, images: &Images, out: &mut Vec<Node>) {
+fn build_children(
+    handle: &Handle,
+    parent: &Style,
+    images: &Images,
+    sheet: &[Rule],
+    out: &mut Vec<Node>,
+) {
     for child in handle.children.borrow().iter() {
         match &child.data {
             NodeData::Text { contents } => {
@@ -266,21 +279,31 @@ fn build_children(handle: &Handle, parent: &Style, images: &Images, out: &mut Ve
                     .iter()
                     .map(|a| (a.name.local.to_string(), a.value.to_string()))
                     .collect();
-                let mut style = resolve_style(&tag, &map, parent);
+
+                // Precedence (E6.3/E6.4): tag + presentational attrs, then <style>/class rules in
+                // specificity order, then the inline style attribute. resolve_style applies the
+                // inline style itself, so it is withheld here and applied last.
+                let mut presentational = map.clone();
+                presentational.remove("style");
+                let mut style = resolve_style(&tag, &presentational, parent);
+                apply_sheet(&mut style, &tag, &map, sheet);
+                if let Some(inline) = map.get("style") {
+                    apply_inline_style(&mut style, inline);
+                }
+
                 // Reserve an inline image's real size so unblocking never reflows (E6.8) — but only
                 // when the message did not specify one.
-                if tag == "img" {
-                    if style.width.is_none() || style.height.is_none() {
-                        let (width, height) = map
-                            .get("src")
-                            .and_then(|src| images.size(src))
-                            .unwrap_or(DEFAULT_IMAGE);
-                        style.width = style.width.or(Some(width));
-                        style.height = style.height.or(Some(height));
-                    }
+                if tag == "img" && (style.width.is_none() || style.height.is_none()) {
+                    let (width, height) = map
+                        .get("src")
+                        .and_then(|src| images.size(src))
+                        .unwrap_or(DEFAULT_IMAGE);
+                    style.width = style.width.or(Some(width));
+                    style.height = style.height.or(Some(height));
                 }
+
                 let mut children = Vec::new();
-                build_children(child, &style, images, &mut children);
+                build_children(child, &style, images, sheet, &mut children);
                 out.push(Node::Element(Element {
                     tag,
                     attrs: map,
@@ -290,6 +313,126 @@ fn build_children(handle: &Handle, parent: &Style, images: &Images, out: &mut Ve
             }
             _ => {}
         }
+    }
+}
+
+// --- The `<style>` subset (E6.3/E6.4) --------------------------------------------------------
+
+/// One parsed rule. Selectors are approximated: descendant combinators are ignored and only the
+/// last compound is matched, which is the common case in mail.
+struct Rule {
+    tag: Option<String>,
+    id: Option<String>,
+    classes: Vec<String>,
+    declarations: String,
+    specificity: u32,
+}
+
+/// Concatenate every `<style>` block's contents. Ammonia strips the tags anyway, so this runs first.
+fn extract_styles(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::new();
+    let mut cursor = 0;
+    while let Some(open) = lower[cursor..].find("<style") {
+        let open = cursor + open;
+        let Some(gt) = lower[open..].find('>') else { break };
+        let start = open + gt + 1;
+        let Some(close) = lower[start..].find("</style") else { break };
+        let end = start + close;
+        out.push_str(&html[start..end]);
+        out.push('\n');
+        cursor = end;
+    }
+    out
+}
+
+fn parse_sheet(css: &str) -> Vec<Rule> {
+    // Drop comments.
+    let mut cleaned = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(start) = rest.find("/*") {
+        cleaned.push_str(&rest[..start]);
+        match rest[start + 2..].find("*/") {
+            Some(end) => rest = &rest[start + 2 + end + 2..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    cleaned.push_str(rest);
+
+    let mut rules = Vec::new();
+    for block in cleaned.split('}') {
+        let Some((selectors, declarations)) = block.split_once('{') else {
+            continue;
+        };
+        let declarations = declarations.trim();
+        if declarations.is_empty() {
+            continue;
+        }
+        for selector in selectors.split(',') {
+            let selector = selector.trim();
+            if selector.is_empty() || selector.contains('@') {
+                continue;
+            }
+            // Only the last compound of a descendant selector is matched.
+            let compound = selector.split_whitespace().last().unwrap_or(selector);
+            let mut tag = None;
+            let mut id = None;
+            let mut classes = Vec::new();
+            for part in compound.split_inclusive(['.', '#']) {
+                let token = part.trim().to_string();
+                if token.is_empty() {
+                    continue;
+                }
+                if let Some(rest) = token.strip_prefix('.') {
+                    classes.push(rest.trim_end_matches('.').to_string());
+                } else if let Some(rest) = token.strip_prefix('#') {
+                    id = Some(rest.trim_end_matches('#').to_string());
+                } else {
+                    let name = token.trim_end_matches(['.', '#']).to_string();
+                    if !name.is_empty() {
+                        tag = Some(name);
+                    }
+                }
+            }
+            let specificity = (id.is_some() as u32) * 100
+                + classes.len() as u32 * 10
+                + tag.is_some() as u32;
+            rules.push(Rule {
+                tag,
+                id,
+                classes,
+                declarations: declarations.to_string(),
+                specificity,
+            });
+        }
+    }
+    rules
+}
+
+fn apply_sheet(style: &mut Style, tag: &str, attrs: &HashMap<String, String>, sheet: &[Rule]) {
+    let id = attrs.get("id").map(String::as_str).unwrap_or("");
+    let class_attr = attrs.get("class").map(String::as_str).unwrap_or("");
+    let classes: Vec<&str> = class_attr.split_whitespace().collect();
+
+    let mut matching: Vec<&Rule> = sheet
+        .iter()
+        .filter(|rule| {
+            rule.tag
+                .as_deref()
+                .is_none_or(|expected| expected.eq_ignore_ascii_case(tag))
+                && rule.id.as_deref().is_none_or(|expected| expected == id)
+                && rule
+                    .classes
+                    .iter()
+                    .all(|class| classes.iter().any(|candidate| candidate == class))
+        })
+        .collect();
+    matching.sort_by_key(|rule| rule.specificity);
+    for rule in matching {
+        apply_inline_style(style, &rule.declarations);
     }
 }
 
