@@ -555,11 +555,14 @@ its own workspace so the app's lockfile is untouched, and each writes its result
 - [ ] 0.9 — Fixture generator: a synthetic store with 200k messages across 8 mailboxes and 20k
       events, plus a `--fixture` mode that points the app at it. All list and search benchmarks run
       against this, never against the real mailbox.
-- [ ] 0.10 — CI matrix from day one: GitHub Actions on `macos-latest`, `ubuntu-latest`,
+- [x] 0.10 — CI matrix from day one: GitHub Actions on `macos-latest`, `ubuntu-latest`,
       `windows-latest`, building **the GPUI binary itself** on all three (the reference project's
       CI only builds it on macOS, and that is explicitly the gap to not repeat) plus
       `cargo test --workspace`. Ubuntu runner needs the Vulkan and portal packages listed in
-      BUILDING.md.
+      BUILDING.md. **Green on all three, 2026-09-21 (run 35553496010):** `cargo build` + `cargo test`
+      on macOS, Ubuntu and Windows, and all three spikes build on all three. The Ubuntu runner
+      installs the Vulkan loader and the X11/Wayland/font build deps; BUILDING.md's package list is
+      E18.4.
 - [ ] 0.11 — Test hardware available: a Linux machine **with a working Vulkan driver** (§1.2 — this
       is not optional) and a Windows machine. Both with a checkout that builds. *(The Pi 5 at
       `neo.local` builds `cargo build --workspace` in 30m50s, verified 2026-09-21, with V3D hardware

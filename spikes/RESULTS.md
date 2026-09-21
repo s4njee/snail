@@ -272,3 +272,14 @@ with **F2**; it draws frame-interval p50/p99, GPUI's draw/present p50/p99 (the `
 `FrameTimingCollector`), RSS now/peak, and the startup summary — rows/store/last-sync are
 placeholders until E2/E4. Only while visible does the shell schedule a notify per frame, so a closed
 overlay costs nothing (idle-CPU budget, §4). Smoke-tested: `first_frame @ 629 ms` in a debug build.
+
+---
+
+## E0.10 — CI matrix
+
+**PASS.** GitHub Actions builds the GPUI binary and runs `cargo test --workspace` on `macos-latest`,
+`ubuntu-latest` and `windows-latest`, and builds all three spikes on all three. Run `35553496010`
+(2026-09-21) is green across all six jobs. The Ubuntu runner installs the Vulkan loader plus the
+X11/Wayland/font/clang build deps; a first attempt failed to link `-lxkbcommon-x11` because the
+spikes job had a shorter dependency list than the main job. `BUILDING.md` (E18.4) still owes the
+per-platform prerequisite list, including the Linux Vulkan *driver* requirement.
