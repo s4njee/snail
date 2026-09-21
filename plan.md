@@ -913,27 +913,25 @@ background executor.*
 E0.3 spike's failure taxonomy. All of it lives in `snail-core` (parse/sanitize) and `snail-ui`
 (layout), so the whole thing is testable without GPUI.*
 
-*First cut done (2026-09-21): the reading pane renders HTML messages through the E0.3 pipeline —
-ammonia sanitize keeping the supported `style` subset → html5ever → the `snail-ui` DOM → block/inline
-layout with real GPUI text metrics → painted fragments. **Inline `cid:` images are decoded from the
-cached raw MIME and painted with their size reserved (6.8)**, and **remote images are blocked by
-default but load, decode and content-address-cache on the background executor once unblocked** (F4
-or `SNAIL_REMOTE_IMAGES=1`), re-laying out without reflow. `<style>` blocks and class rules are
-resolved between presentational attributes and the inline style (6.3/6.4). It is the E0.3 prototype
-promoted into `crates/snail/src/html_view.rs`; the E6 crate-boundary decision (where parse/sanitize
-lives, since `snail-core` and `snail-ui` may not depend on each other) is still open, which is why
-the parsing sits in the bin for now. Remaining: `colspan`/nested tables (6.6), the per-sender
-"always load images" allowance rather than a global switch (6.2), quoted-text folding (6.9),
-selection (6.10), and the corpus snapshot test (6.14).*
+*Completed (2026-09-21): untrusted MIME/HTML ingestion and sanitization live in `snail-core`, the
+restricted style and layout model lives in `snail-ui`, and the GPUI adapter paints a virtualized
+display list. The finished path includes real-part MIME selection with a persistent HTML/plain
+preference, flowed text and legacy charset decoding; an explicit sanitizer allowlist and inert
+remote-resource tokens; descendant-aware class/id/tag rules with media and unsupported CSS dropped;
+fixed/auto tables with spans, nesting, legacy cell padding/spacing, percentage geometry, decorated
+inline blocks, and mixed text runs; CID plus content-address-cached remote images with stable
+placeholders and a local per-sender allowance; quote folding, document-wide selection/copy, guarded
+system links, a sanitized browser escape hatch, and budgeted plain/flattened fallback. The E0.3
+corpus plus NYT/LinkedIn regressions is checked in as deterministic box-tree snapshots.*
 
-- [ ] 6.1 — MIME → displayable document: walk the part tree, pick the best alternative
+- [x] 6.1 — MIME → displayable document: walk the part tree, pick the best alternative
       (`text/plain` vs `text/html` per the settings toggle), resolve `multipart/related` `cid:`
       references to cached attachment files, handle `format=flowed` for plain text, and decode
       every charset the wild throws (not just UTF-8 — legacy `ISO-8859-*`, `Shift_JIS`, `GB2312`).
       **Carry the E0.3 selector finding:** `body_html()` converts plain text and the
       `html_body_count()`/`text_body_count()` lists are unreliable (mail-parser copies a lone part
       across both), so select on `part.is_text_html()` / `is_text()`.
-- [ ] 6.2 — Sanitize with `ammonia` against an explicit allowlist. Strip `<script>`, `<iframe>`,
+- [x] 6.2 — Sanitize with `ammonia` against an explicit allowlist. Strip `<script>`, `<iframe>`,
       `<object>`, `<form>`, every `on*` handler, and `javascript:`/`data:` URLs. **All remote URLs
       are rewritten to a blocked placeholder by default** — this is architecture, not a setting
       (§1.4). A per-sender "always load images" allowance is stored locally.
@@ -942,40 +940,40 @@ selection (6.10), and the corpus snapshot test (6.14).*
       `filter_style_properties`) ammonia's pass — otherwise the pipeline loses the formatting it is
       about to implement. Also, `TextView::html` fetches remote images on its own, so URL rewriting
       must happen before the document reaches any renderer.
-- [ ] 6.3 — Parse the sanitized document with `html5ever` into our own simplified DOM — elements,
+- [x] 6.3 — Parse the sanitized document with `html5ever` into our own simplified DOM — elements,
       text, and the computed subset of style. Not a general CSSOM: resolve `style=""`, the
       supported properties from `<style>` blocks, and the legacy presentational attributes email
       actually uses (`bgcolor`, `align`, `valign`, `width`, `height`, `cellpadding`, `cellspacing`,
       `border`, `<font size|color|face>`).
-- [ ] 6.4 — The supported CSS subset, written down as a document and as a test fixture:
+- [x] 6.4 — The supported CSS subset, written down as a document and as a test fixture:
       `color`, `background-color`, `font-family|size|weight|style`, `text-align`,
       `text-decoration`, `line-height`, `margin`, `padding`, `border*`, `width`/`height`/`max-width`
       (px and %), `display: block|inline|inline-block|table*|none`, `vertical-align`, `list-style`.
       **Not supported and deliberately so:** float, position, flex, grid, transforms, media
       queries, pseudo-elements, web fonts. Anything unsupported is dropped, never approximated.
-- [ ] 6.5 — Layout engine in `snail-ui`: block and inline formatting over the subset, producing
+- [x] 6.5 — Layout engine in `snail-ui`: block and inline formatting over the subset, producing
       positioned boxes from a `FontMetrics` trait (so tests use a fake metrics impl and GPUI
       supplies the real one). Inline layout must handle line breaking, whitespace collapsing, and
       mixed font runs.
-- [ ] 6.6 — **Table layout.** The single biggest piece of E6, because email layout *is* tables.
+- [x] 6.6 — **Table layout.** The single biggest piece of E6, because email layout *is* tables.
       Fixed and auto table algorithms, `colspan`/`rowspan`, nested tables to the depth real
       newsletters use. Budget it as its own multi-week story; fixtures come from E0.3.
-- [ ] 6.7 — Paint the positioned boxes as GPUI elements: text runs, background quads, borders,
+- [x] 6.7 — Paint the positioned boxes as GPUI elements: text runs, background quads, borders,
       images from the cache. Virtualize by only building elements for boxes intersecting the
       viewport, so a 40-screen newsletter costs one screen of elements.
-- [ ] 6.8 — Inline images: `cid:` parts from the cache, and remote images once unblocked — fetched
+- [x] 6.8 — Inline images: `cid:` parts from the cache, and remote images once unblocked — fetched
       on the background executor, decoded with `image`, cached content-addressed, with a
       reserved-size placeholder so unblocking doesn't reflow the world.
-- [ ] 6.9 — Quoted-text folding: detect `<blockquote>` chains and `>`-prefixed plain text, collapse
+- [x] 6.9 — Quoted-text folding: detect `<blockquote>` chains and `>`-prefixed plain text, collapse
       everything below the first quote boundary behind a "•••" control. This is what makes a
       20-message reply chain readable and is absent from both handoffs.
-- [ ] 6.10 — Text selection and copy across the rendered document. Non-trivial with custom layout
+- [x] 6.10 — Text selection and copy across the rendered document. Non-trivial with custom layout
       and genuinely expected by users; scoped explicitly so it is not discovered late.
-- [ ] 6.11 — Link handling: hover shows the real target, click asks before opening anything whose
+- [x] 6.11 — Link handling: hover shows the real target, click asks before opening anything whose
       visible text disagrees with its href (the phishing case), opens via the system browser.
-- [ ] 6.12 — Escape hatch: "Open in browser" writes the sanitized document to a temp file and hands
+- [x] 6.12 — Escape hatch: "Open in browser" writes the sanitized document to a temp file and hands
       it to the system browser. The honest answer for the 2% of messages the subset can't do.
-- [ ] 6.13 — Fallback rendering: if layout fails or exceeds a node/time budget, fall back to
+- [x] 6.13 — Fallback rendering: if layout fails or exceeds a node/time budget, fall back to
       `text/plain`, then to a flattened text extraction. **A message must always render something.**
 - [x] 6.13b — Before building 6.5–6.7, spend a day on **gpui-kit's `TextView`**, which already
       renders Markdown *and* HTML natively (there is an `example-html` in its gallery). If its HTML
@@ -991,7 +989,7 @@ selection (6.10), and the corpus snapshot test (6.14).*
       **Conclusion: E6.5–E6.7 are required, not optional; use `TextView` as 6.13's always-renders
       fallback.** Also note it fetches remote images itself, so 6.2's URL rewriting is mandatory
       *before* any renderer.
-- [ ] 6.14 — Corpus test: render the full E0.3 corpus plus everything added since, snapshot the box
+- [x] 6.14 — Corpus test: render the full E0.3 corpus plus everything added since, snapshot the box
       trees, and fail CI on an unexplained diff. This is the regression net for the whole epic.
 
 ### E7 — Compose, reply and send

@@ -37,12 +37,28 @@ pub struct RawMessage {
 /// A queued local change, drained by the sync loop (E2.5 → E4).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoteOp {
-    Archive { id: String },
-    Trash { id: String },
-    MarkRead { id: String, read: bool },
-    Label { id: String, add: Vec<String>, remove: Vec<String> },
-    Move { id: String, mailbox: String },
-    Send { raw: Vec<u8> },
+    Archive {
+        id: String,
+    },
+    Trash {
+        id: String,
+    },
+    MarkRead {
+        id: String,
+        read: bool,
+    },
+    Label {
+        id: String,
+        add: Vec<String>,
+        remove: Vec<String>,
+    },
+    Move {
+        id: String,
+        mailbox: String,
+    },
+    Send {
+        raw: Vec<u8>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

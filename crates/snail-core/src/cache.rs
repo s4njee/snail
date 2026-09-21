@@ -44,6 +44,32 @@ impl CacheStore {
         }
     }
 
+    /// Store an object content-addressed and remember an independent lookup key. Remote image URLs
+    /// use this so the bytes are deduplicated by content while repeat loads can resolve the URL
+    /// without another network request (E6.8).
+    pub fn put_alias(&self, key: &str, bytes: &[u8]) -> Result<String> {
+        let content_hash = self.put(bytes)?;
+        let alias_hash = hash_bytes(key.as_bytes());
+        let path = self.alias_path(&alias_hash);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let temp = path.with_extension("tmp");
+        std::fs::write(&temp, &content_hash)?;
+        std::fs::rename(temp, path)?;
+        Ok(content_hash)
+    }
+
+    pub fn get_alias(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        let alias_hash = hash_bytes(key.as_bytes());
+        let path = self.alias_path(&alias_hash);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let content_hash = std::fs::read_to_string(path)?;
+        self.get(content_hash.trim())
+    }
+
     /// Delete one object ("clear cache" for a single message).
     pub fn remove(&self, hash: &str) -> Result<()> {
         let path = self.path(hash);
@@ -66,6 +92,12 @@ impl CacheStore {
         let split = hash.len().min(2);
         let (prefix, rest) = hash.split_at(split);
         self.root.join(prefix).join(rest)
+    }
+
+    fn alias_path(&self, hash: &str) -> PathBuf {
+        let split = hash.len().min(2);
+        let (prefix, rest) = hash.split_at(split);
+        self.root.join("aliases").join(prefix).join(rest)
     }
 
     pub fn root(&self) -> &Path {
@@ -128,5 +160,23 @@ mod tests {
         cache.put(b"x").unwrap();
         cache.clear().unwrap();
         assert!(!dir.exists());
+    }
+
+    #[test]
+    fn aliases_resolve_to_content_addressed_objects() {
+        let dir = temp_dir();
+        let cache = CacheStore::new(dir.clone());
+        let hash = cache
+            .put_alias("https://example.test/image.png", b"pixels")
+            .unwrap();
+        assert_eq!(hash, hash_bytes(b"pixels"));
+        assert_eq!(
+            cache
+                .get_alias("https://example.test/image.png")
+                .unwrap()
+                .as_deref(),
+            Some(b"pixels".as_slice())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

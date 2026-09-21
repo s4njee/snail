@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use snail_core::mime::ParsedMessage;
+use snail_core::mime::{BodyPreference, ParsedMessage};
 use snail_core::store::Store;
 
 // The shell sees these through the model, so it never names the store.
@@ -36,9 +36,13 @@ impl MailModel {
     }
 
     /// Parse a message's cached raw MIME. `None` means the cache file is gone (re-fetch is E2.3).
-    pub fn parsed(&self, id: i64) -> Option<ParsedMessage> {
+    pub fn parsed_with_preference(
+        &self,
+        id: i64,
+        preference: BodyPreference,
+    ) -> Option<ParsedMessage> {
         let raw = self.store.raw_bytes(id).ok().flatten()?;
-        snail_core::mime::parse_raw(&raw).ok()
+        snail_core::mime::parse_raw_with_preference(&raw, preference).ok()
     }
 
     /// The cached raw MIME bytes, for resolving inline `cid:` images (E6.8).
@@ -49,8 +53,7 @@ impl MailModel {
     /// Fetch a remote image, served from the content-addressed cache when it has been seen (E6.8).
     /// Runs on whatever thread calls it — the shell calls it from the background executor.
     pub fn fetch_remote_image(&self, url: &str) -> Option<Vec<u8>> {
-        let key = snail_core::cache::hash_bytes(url.as_bytes());
-        if let Ok(Some(cached)) = self.store.cache().get(&key) {
+        if let Ok(Some(cached)) = self.store.cache().get_alias(url) {
             return Some(cached);
         }
         let response = reqwest::blocking::Client::builder()
@@ -69,7 +72,7 @@ impl MailModel {
         if bytes.len() > 10 * 1024 * 1024 {
             return None;
         }
-        let _ = self.store.cache().put(&bytes);
+        let _ = self.store.cache().put_alias(url, &bytes);
         Some(bytes)
     }
 }

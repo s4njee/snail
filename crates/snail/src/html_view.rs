@@ -1,20 +1,19 @@
 //! The HTML message renderer (plan.md E6): sanitize → html5ever → the `snail-ui` DOM → layout →
 //! GPUI elements, including inline `cid:` images (E6.8).
 //!
-//! The parsing lives here, not in `snail-core`, because the E6 crate-boundary decision is still
-//! open: `snail-ui` owns the DOM and layout but may not depend on `snail-core`. Remote images are
-//! **not** fetched — they stay blocked placeholders (E6.2); only `cid:` parts, whose bytes are
-//! already in the cached raw MIME, are decoded and painted.
+//! Untrusted parsing and sanitization live in `snail-core`; this adapter computes the restricted
+//! style subset, asks `snail-ui` for framework-free layout, then paints GPUI elements.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use html5ever::tendril::TendrilSink;
-use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
-use snail_ui::html::{apply_inline_style, resolve_style, Element, FontSpec, Node, Style};
+use snail_core::html::{HtmlNode as CoreNode, SanitizedDocument};
+use snail_ui::html::{Element, FontSpec, Node, Style, apply_inline_style, resolve_style};
 use snail_ui::layout::{self, Fragment, TextMeasure};
 
 /// A decoded inline image, with the size it should occupy.
@@ -54,16 +53,20 @@ impl Images {
     }
 
     fn size(&self, src: &str) -> Option<(f32, f32)> {
-        self.resolve(src).map(|placed| (placed.width, placed.height))
+        self.resolve(src)
+            .map(|placed| (placed.width, placed.height))
     }
 
     /// Add a remote image once it has been fetched and decoded (E6.8).
     pub fn insert_remote(&mut self, url: &str, width: f32, height: f32, render: Arc<RenderImage>) {
-        self.map.insert(url.to_string(), Placed {
-            width,
-            height,
-            render,
-        });
+        self.map.insert(
+            url.to_string(),
+            Placed {
+                width,
+                height,
+                render,
+            },
+        );
     }
 
     pub fn contains(&self, url: &str) -> bool {
@@ -71,42 +74,8 @@ impl Images {
     }
 }
 
-/// Every `http(s)` image URL in a document (E6.8). Remote images are only fetched when the user has
-/// unblocked them (E6.2); by default they stay placeholders.
-pub fn remote_image_urls(html: &str) -> Vec<String> {
-    let lower = html.to_ascii_lowercase();
-    let mut out = Vec::new();
-    let mut cursor = 0;
-    while let Some(found) = lower[cursor..].find("src=") {
-        let start = cursor + found + 4;
-        let rest = html[start..].trim_start();
-        let (quote, body) = match rest.chars().next() {
-            Some('"') => ('"', &rest[1..]),
-            Some('\'') => ('\'', &rest[1..]),
-            _ => (' ', rest),
-        };
-        let end = body.find(quote).unwrap_or(body.len());
-        let value = &body[..end];
-        if value.starts_with("http://") || value.starts_with("https://") {
-            out.push(value.to_string());
-        }
-        cursor = start + end + 1;
-    }
-    // CSS background images too (E6.8): `background-image: url(...)`.
-    let mut cursor = 0;
-    while let Some(found) = lower[cursor..].find("url(") {
-        let start = cursor + found + 4;
-        let rest = html[start..].trim_start().trim_start_matches(['"', '\'']);
-        let end = rest.find(['"', '\'', ')']).unwrap_or(rest.len());
-        let value = &rest[..end];
-        if value.starts_with("http://") || value.starts_with("https://") {
-            out.push(value.to_string());
-        }
-        cursor = start + end + 1;
-    }
-    out.sort();
-    out.dedup();
-    out
+pub fn prepare_document(html: &str) -> SanitizedDocument {
+    snail_core::html::sanitize_document(html)
 }
 
 /// Decode an image to BGRA bytes plus its size, ready for gpui's `RenderImage`.
@@ -142,25 +111,80 @@ fn decode(bytes: &[u8]) -> Option<Placed> {
 pub struct HtmlView {
     fragments: Vec<Fragment>,
     width: f32,
-    height: f32,
+    pub height: f32,
+    selection: gpui_kit::base::TextSelectionHandle,
 }
 
-/// Sanitize, parse and lay out `html` at `width`, measuring text with the window's text system.
-pub fn layout_html(html: &str, width: f32, window: &Window, images: &Images) -> HtmlView {
-    let dom = parse_to_dom(html, images);
-    let measure = GpuiMeasure {
-        text_system: window.text_system(),
-    };
-    let result = layout::layout(&dom, width, &measure);
-    HtmlView {
-        fragments: result.fragments,
-        width,
-        height: result.height,
+impl HtmlView {
+    pub fn selection(&self) -> gpui_kit::base::TextSelectionHandle {
+        self.selection.clone()
     }
 }
 
-/// Paint the laid-out document as absolutely-positioned elements inside a relative box.
-pub fn paint(view: &HtmlView, images: &Images) -> AnyElement {
+/// Sanitize, parse and lay out `html` at `width`, measuring text with the window's text system.
+pub fn layout_document(
+    document: &SanitizedDocument,
+    width: f32,
+    window: &Window,
+    images: &Images,
+    selection: Option<gpui_kit::base::TextSelectionHandle>,
+    show_quotes: bool,
+    cx: &mut App,
+) -> Result<HtmlView, layout::LayoutError> {
+    let dom = parse_to_dom(document, images, show_quotes);
+    let measure = GpuiMeasure {
+        text_system: window.text_system(),
+    };
+    let result =
+        layout::layout_with_limits(&dom, width, &measure, layout::LayoutLimits::default())?;
+    let selection = selection.unwrap_or_else(|| {
+        gpui_kit::base::TextSelectionHandle::new(document.plain_text.clone(), cx)
+    });
+    selection.set_fallback_copy_text(document.plain_text.clone(), cx);
+    Ok(HtmlView {
+        fragments: result.fragments,
+        width,
+        height: result.height,
+        selection,
+    })
+}
+
+pub fn has_quoted_content(document: &SanitizedDocument) -> bool {
+    fn visit(nodes: &[CoreNode]) -> bool {
+        nodes.iter().any(|node| match node {
+            CoreNode::Element(element) => {
+                element.tag.eq_ignore_ascii_case("blockquote") || visit(&element.children)
+            }
+            CoreNode::Text(_) => false,
+        })
+    }
+    visit(&document.roots)
+}
+
+/// Write only the already-sanitized, network-inert document for the browser escape hatch.
+pub fn browser_file(document: &SanitizedDocument) -> std::io::Result<PathBuf> {
+    let body = format!(
+        "<!doctype html><meta charset=\"utf-8\"><style>{}</style>{}",
+        document.stylesheet, document.html
+    );
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    body.hash(&mut hasher);
+    let path = std::env::temp_dir().join(format!("snail-message-{:016x}.html", hasher.finish()));
+    std::fs::write(&path, body)?;
+    Ok(path)
+}
+
+/// Paint only fragments intersecting the viewport (plus overscan) while retaining a full-height
+/// document box so the native scroll container keeps correct geometry (E6.7).
+pub fn paint(
+    view: &HtmlView,
+    images: &Images,
+    visible_top: f32,
+    visible_height: f32,
+) -> AnyElement {
+    let overscan = 320.0;
+    let min_y = (visible_top - overscan).max(0.0);
+    let max_y = visible_top + visible_height.max(600.0) + overscan;
     div()
         .relative()
         .w(px(view.width))
@@ -169,15 +193,42 @@ pub fn paint(view: &HtmlView, images: &Images) -> AnyElement {
         // does not turn every message black.
         .bg(rgb(0xffffff))
         .text_color(rgb(0x241f1b))
-        .children(view.fragments.iter().map(|fragment| paint_fragment(fragment, images)))
+        .children(
+            view.fragments
+                .iter()
+                .enumerate()
+                .filter_map(|(index, fragment)| {
+                    fragment_intersects(fragment, min_y, max_y)
+                        .then(|| paint_fragment(index, fragment, images, &view.selection))
+                }),
+        )
         .into_any_element()
 }
 
 const DEFAULT_IMAGE: (f32, f32) = (240.0, 140.0);
 
-fn paint_fragment(fragment: &Fragment, images: &Images) -> AnyElement {
+fn fragment_intersects(fragment: &Fragment, min_y: f32, max_y: f32) -> bool {
+    let (top, bottom) = match fragment {
+        Fragment::Rect { rect, .. }
+        | Fragment::Border { rect, .. }
+        | Fragment::Image { rect, .. } => (rect.y, rect.y + rect.h),
+        Fragment::Word { y, font, .. } => (*y, *y + layout::line_height(font)),
+    };
+    bottom >= min_y && top <= max_y
+}
+
+fn paint_fragment(
+    index: usize,
+    fragment: &Fragment,
+    images: &Images,
+    selection: &gpui_kit::base::TextSelectionHandle,
+) -> AnyElement {
     match fragment {
-        Fragment::Rect { rect, color, radius } => div()
+        Fragment::Rect {
+            rect,
+            color,
+            radius,
+        } => div()
             .absolute()
             .left(px(rect.x))
             .top(px(rect.y))
@@ -202,23 +253,59 @@ fn paint_fragment(fragment: &Fragment, images: &Images) -> AnyElement {
             font,
             color,
             underline,
-        } => div()
-            .absolute()
-            .left(px(*x))
-            .top(px(*y))
-            // Same family as the measurer, or the laid-out widths and the painted glyphs disagree.
-            .font_family("Helvetica")
-            .text_size(px(font.size))
-            .text_color(rgba(to_u32(*color)))
-            .font_weight(if font.bold {
+            href,
+        } => {
+            let selectable = gpui_kit::base::SelectableText::with_handle(
+                format!("html-word-{index}"),
+                selection.clone(),
+                format!("{text} "),
+            )
+            .document_order(index as u64);
+            let weight = if font.bold {
                 FontWeight::BOLD
             } else {
                 FontWeight::NORMAL
-            })
-            .when(*underline, |this| this.underline())
-            .when(font.italic, |this| this.italic())
-            .child(text.clone())
-            .into_any_element(),
+            };
+            let family = font.family.clone().unwrap_or_else(|| "Helvetica".into());
+            if let Some(href) = href {
+                let target = href.clone();
+                let tooltip = target.clone();
+                let visible = text.clone();
+                gpui_kit::base::Link::new(format!("html-link-{index}"))
+                    .absolute()
+                    .left(px(*x))
+                    .top(px(*y))
+                    .font_family(family)
+                    .text_size(px(font.size))
+                    .text_color(rgba(to_u32(*color)))
+                    .font_weight(weight)
+                    .when(*underline, |this| this.underline())
+                    .when(font.italic, |this| this.italic())
+                    .href(target.clone())
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(tooltip.clone())
+                            .build(window, cx)
+                    })
+                    .open_with(move |href, _, window, cx| {
+                        open_link(visible.clone(), href.to_string(), window, cx)
+                    })
+                    .child(selectable)
+                    .into_any_element()
+            } else {
+                div()
+                    .absolute()
+                    .left(px(*x))
+                    .top(px(*y))
+                    .font_family(family)
+                    .text_size(px(font.size))
+                    .text_color(rgba(to_u32(*color)))
+                    .font_weight(weight)
+                    .when(*underline, |this| this.underline())
+                    .when(font.italic, |this| this.italic())
+                    .child(selectable)
+                    .into_any_element()
+            }
+        }
         Fragment::Image { rect, src } => match images.resolve(src) {
             // A real inline image (E6.8).
             Some(placed) => img(ImageSource::Render(placed.render.clone()))
@@ -243,13 +330,66 @@ fn paint_fragment(fragment: &Fragment, images: &Images) -> AnyElement {
                 .justify_center()
                 .text_size(px(11.0))
                 .text_color(rgb(0x8a837b))
-                .child(if src.is_empty() {
-                    "[image]".to_string()
-                } else {
-                    format!("[image blocked] {}", short(src))
+                .when(rect.w >= 120.0 && rect.h >= 48.0, |this| {
+                    this.child(if src.is_empty() {
+                        "[image]"
+                    } else {
+                        "[remote image blocked]"
+                    })
                 })
                 .into_any_element(),
         },
+    }
+}
+
+fn open_link(visible: String, target: String, window: &mut Window, cx: &mut App) {
+    if !matches!(
+        target.to_ascii_lowercase().split(':').next(),
+        Some("http" | "https" | "mailto")
+    ) {
+        return;
+    }
+    if !link_needs_confirmation(&visible, &target) {
+        cx.open_url(&target);
+        return;
+    }
+    let detail = format!("The link text says “{visible}”, but it opens:\n{target}");
+    let answer = window.prompt(
+        PromptLevel::Warning,
+        "Open a different link target?",
+        Some(&detail),
+        &[
+            PromptButton::ok("Open link"),
+            PromptButton::cancel("Cancel"),
+        ],
+        cx,
+    );
+    cx.spawn(async move |cx| {
+        if answer.await.ok() == Some(0) {
+            cx.update(|cx| cx.open_url(&target));
+        }
+    })
+    .detach();
+}
+
+fn link_needs_confirmation(visible: &str, target: &str) -> bool {
+    fn host(value: &str) -> Option<String> {
+        let lower = value.trim().to_ascii_lowercase();
+        let rest = lower
+            .strip_prefix("https://")
+            .or_else(|| lower.strip_prefix("http://"))
+            .or_else(|| lower.strip_prefix("www."))?;
+        Some(
+            rest.split(['/', ':', '?', '#'])
+                .next()
+                .unwrap_or("")
+                .trim_start_matches("www.")
+                .to_string(),
+        )
+    }
+    match (host(visible), host(target)) {
+        (Some(visible), Some(target)) => !visible.is_empty() && visible != target,
+        _ => false,
     }
 }
 
@@ -257,97 +397,47 @@ fn to_u32(color: [u8; 4]) -> u32 {
     (color[0] as u32) << 24 | (color[1] as u32) << 16 | (color[2] as u32) << 8 | color[3] as u32
 }
 
-fn short(input: &str) -> String {
-    let cleaned = input.trim_start_matches("cid:").trim();
-    if cleaned.chars().count() <= 40 {
-        cleaned.to_string()
-    } else {
-        let tail: String = cleaned.chars().rev().take(36).collect::<Vec<_>>().into_iter().rev().collect();
-        format!("…{tail}")
-    }
-}
-
-/// Ammonia, configured for a reader: keep the style subset E6.4 supports and the legacy
-/// presentational attributes, still stripping scripts, iframes and event handlers (E6.2).
-fn sanitize(html: &str) -> String {
-    let properties: HashSet<&str> = [
-        "color", "background", "background-color", "font-size", "font-weight", "font-style",
-        "text-decoration", "text-decoration-line", "text-align", "margin", "margin-top",
-        "margin-bottom", "padding", "border", "border-width", "border-color", "width", "height",
-        "display", "background-image",
-    ]
-    .into_iter()
-    .collect();
-    ammonia::Builder::default()
-        .add_tags([
-            "table", "thead", "tbody", "tfoot", "tr", "td", "th", "caption", "colgroup", "col",
-            "font", "center", "span", "blockquote", "pre", "h1", "h2", "h3", "h4", "h5", "h6",
-        ])
-        .add_generic_attributes([
-            "style", "class", "align", "valign", "bgcolor", "width", "height", "colspan", "rowspan",
-            "border", "cellpadding", "cellspacing", "color", "face", "size", "src", "alt",
-        ])
-        .filter_style_properties(properties)
-        .clean(html)
-        .to_string()
-}
-
-fn parse_to_dom(html: &str, images: &Images) -> Vec<Node> {
-    let sheet = parse_sheet(&extract_styles(html));
-    let sanitized = sanitize(html);
-    let dom = html5ever::parse_document(RcDom::default(), Default::default()).one(sanitized);
+fn parse_to_dom(document: &SanitizedDocument, images: &Images, show_quotes: bool) -> Vec<Node> {
+    let sheet = parse_sheet(&document.stylesheet);
     let mut roots = Vec::new();
     let parent = Style::default();
-    let body = find_body(&dom.document);
+    let ancestors = Vec::new();
     build_children(
-        body.as_ref().unwrap_or(&dom.document),
+        &document.roots,
         &parent,
         images,
         &sheet,
+        show_quotes,
+        None,
+        &ancestors,
         &mut roots,
     );
     roots
 }
 
-fn find_body(handle: &Handle) -> Option<Handle> {
-    for child in handle.children.borrow().iter() {
-        if let NodeData::Element { name, .. } = &child.data {
-            if name.local.as_ref() == "body" {
-                return Some(child.clone());
-            }
-        }
-        if let Some(found) = find_body(child) {
-            return Some(found);
-        }
-    }
-    None
-}
-
 fn build_children(
-    handle: &Handle,
+    source: &[CoreNode],
     parent: &Style,
     images: &Images,
     sheet: &[Rule],
+    show_quotes: bool,
+    inherited_cell_padding: Option<f32>,
+    ancestors: &[(String, HashMap<String, String>)],
     out: &mut Vec<Node>,
-) {
-    for child in handle.children.borrow().iter() {
-        match &child.data {
-            NodeData::Text { contents } => {
-                let text = contents.borrow().to_string();
+) -> bool {
+    for child in source {
+        match child {
+            CoreNode::Text(text) => {
                 if !text.trim().is_empty() {
-                    out.push(Node::Text(text));
+                    out.push(Node::Text(text.clone()));
                 }
             }
-            NodeData::Element { name, attrs, .. } => {
-                let tag = name.local.to_string();
-                if matches!(tag.as_str(), "script" | "style" | "head" | "meta" | "title" | "link") {
-                    continue;
+            CoreNode::Element(element) => {
+                let tag = element.tag.clone();
+                if !show_quotes && tag.eq_ignore_ascii_case("blockquote") {
+                    return true;
                 }
-                let map: HashMap<String, String> = attrs
-                    .borrow()
-                    .iter()
-                    .map(|a| (a.name.local.to_string(), a.value.to_string()))
-                    .collect();
+                let map = element.attrs.clone();
 
                 // Precedence (E6.3/E6.4): tag + presentational attrs, then <style>/class rules in
                 // specificity order, then the inline style attribute. resolve_style applies the
@@ -355,9 +445,21 @@ fn build_children(
                 let mut presentational = map.clone();
                 presentational.remove("style");
                 let mut style = resolve_style(&tag, &presentational, parent);
-                apply_sheet(&mut style, &tag, &map, sheet);
+                apply_sheet(&mut style, &tag, &map, ancestors, sheet);
                 if let Some(inline) = map.get("style") {
                     apply_inline_style(&mut style, inline);
+                }
+                if matches!(tag.as_str(), "td" | "th")
+                    && let Some(padding) = inherited_cell_padding
+                    && style.padding_top == 0.0
+                    && style.padding_right == 0.0
+                    && style.padding_bottom == 0.0
+                    && style.padding_left == 0.0
+                {
+                    style.padding_top = padding;
+                    style.padding_right = padding;
+                    style.padding_bottom = padding;
+                    style.padding_left = padding;
                 }
 
                 // Reserve an inline image's real size so unblocking never reflows (E6.8) — but only
@@ -365,6 +467,7 @@ fn build_children(
                 if tag == "img" && (style.width.is_none() || style.height.is_none()) {
                     let (width, height) = map
                         .get("src")
+                        .filter(|src| !src.starts_with(snail_core::html::REMOTE_TOKEN_PREFIX))
                         .and_then(|src| images.size(src))
                         .unwrap_or(DEFAULT_IMAGE);
                     style.width = style.width.or(Some(width));
@@ -372,17 +475,36 @@ fn build_children(
                 }
 
                 let mut children = Vec::new();
-                build_children(child, &style, images, sheet, &mut children);
+                let mut child_ancestors = ancestors.to_vec();
+                child_ancestors.push((tag.clone(), map.clone()));
+                let child_cell_padding = if tag == "table" {
+                    Some(style.cell_padding)
+                } else {
+                    inherited_cell_padding
+                };
+                let quote_boundary = build_children(
+                    &element.children,
+                    &style,
+                    images,
+                    sheet,
+                    show_quotes,
+                    child_cell_padding,
+                    &child_ancestors,
+                    &mut children,
+                );
                 out.push(Node::Element(Element {
                     tag,
                     attrs: map,
                     style,
                     children,
                 }));
+                if quote_boundary {
+                    return true;
+                }
             }
-            _ => {}
         }
     }
+    false
 }
 
 // --- The `<style>` subset (E6.3/E6.4) --------------------------------------------------------
@@ -390,35 +512,23 @@ fn build_children(
 /// One parsed rule. Selectors are approximated: descendant combinators are ignored and only the
 /// last compound is matched, which is the common case in mail.
 struct Rule {
-    tag: Option<String>,
-    id: Option<String>,
-    classes: Vec<String>,
+    compounds: Vec<Compound>,
     declarations: String,
     specificity: u32,
 }
 
-/// Concatenate every `<style>` block's contents. Ammonia strips the tags anyway, so this runs first.
-fn extract_styles(html: &str) -> String {
-    let lower = html.to_ascii_lowercase();
-    let mut out = String::new();
-    let mut cursor = 0;
-    while let Some(open) = lower[cursor..].find("<style") {
-        let open = cursor + open;
-        let Some(gt) = lower[open..].find('>') else { break };
-        let start = open + gt + 1;
-        let Some(close) = lower[start..].find("</style") else { break };
-        let end = start + close;
-        out.push_str(&html[start..end]);
-        out.push('\n');
-        cursor = end;
-    }
-    out
+#[derive(Clone)]
+struct Compound {
+    tag: Option<String>,
+    id: Option<String>,
+    classes: Vec<String>,
 }
 
 fn parse_sheet(css: &str) -> Vec<Rule> {
+    let css = strip_at_rules(css);
     // Drop comments.
     let mut cleaned = String::with_capacity(css.len());
-    let mut rest = css;
+    let mut rest = css.as_str();
     while let Some(start) = rest.find("/*") {
         cleaned.push_str(&rest[..start]);
         match rest[start + 2..].find("*/") {
@@ -442,37 +552,35 @@ fn parse_sheet(css: &str) -> Vec<Rule> {
         }
         for selector in selectors.split(',') {
             let selector = selector.trim();
-            if selector.is_empty() || selector.contains('@') {
+            if selector.is_empty()
+                || selector
+                    .chars()
+                    .any(|character| matches!(character, '@' | ':' | '[' | '+' | '~'))
+            {
                 continue;
             }
-            // Only the last compound of a descendant selector is matched.
-            let compound = selector.split_whitespace().last().unwrap_or(selector);
-            let mut tag = None;
-            let mut id = None;
-            let mut classes = Vec::new();
-            for part in compound.split_inclusive(['.', '#']) {
-                let token = part.trim().to_string();
-                if token.is_empty() {
-                    continue;
-                }
-                if let Some(rest) = token.strip_prefix('.') {
-                    classes.push(rest.trim_end_matches('.').to_string());
-                } else if let Some(rest) = token.strip_prefix('#') {
-                    id = Some(rest.trim_end_matches('#').to_string());
-                } else {
-                    let name = token.trim_end_matches(['.', '#']).to_string();
-                    if !name.is_empty() {
-                        tag = Some(name);
-                    }
-                }
+            let compounds = selector
+                .replace('>', " ")
+                .split_whitespace()
+                .map(|compound| {
+                    let (tag, id, classes) = parse_compound_selector(compound);
+                    Compound { tag, id, classes }
+                })
+                .filter(|compound| {
+                    compound.tag.is_some() || compound.id.is_some() || !compound.classes.is_empty()
+                })
+                .collect::<Vec<_>>();
+            if compounds.is_empty() {
+                continue;
             }
-            let specificity = (id.is_some() as u32) * 100
-                + classes.len() as u32 * 10
-                + tag.is_some() as u32;
+            let specificity = compounds.iter().fold(0, |specificity, compound| {
+                specificity
+                    + (compound.id.is_some() as u32) * 100
+                    + compound.classes.len() as u32 * 10
+                    + compound.tag.is_some() as u32
+            });
             rules.push(Rule {
-                tag,
-                id,
-                classes,
+                compounds,
                 declarations: declarations.to_string(),
                 specificity,
             });
@@ -481,22 +589,133 @@ fn parse_sheet(css: &str) -> Vec<Rule> {
     rules
 }
 
-fn apply_sheet(style: &mut Style, tag: &str, attrs: &HashMap<String, String>, sheet: &[Rule]) {
-    let id = attrs.get("id").map(String::as_str).unwrap_or("");
-    let class_attr = attrs.get("class").map(String::as_str).unwrap_or("");
-    let classes: Vec<&str> = class_attr.split_whitespace().collect();
+fn strip_at_rules(css: &str) -> String {
+    let bytes = css.as_bytes();
+    let mut output = String::with_capacity(css.len());
+    let mut index = 0;
+    let mut copy_start = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'@' {
+            index += 1;
+            continue;
+        }
+        output.push_str(&css[copy_start..index]);
+        let mut cursor = index + 1;
+        while cursor < bytes.len() && !matches!(bytes[cursor], b'{' | b';') {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() {
+            copy_start = bytes.len();
+            index = bytes.len();
+            continue;
+        }
+        if bytes[cursor] == b';' {
+            index = cursor + 1;
+            copy_start = index;
+            continue;
+        }
+        let mut depth = 1usize;
+        cursor += 1;
+        while cursor < bytes.len() && depth > 0 {
+            match bytes[cursor] {
+                b'{' => depth += 1,
+                b'}' => depth -= 1,
+                _ => {}
+            }
+            cursor += 1;
+        }
+        index = cursor;
+        copy_start = index;
+    }
+    output.push_str(&css[copy_start..]);
+    output
+}
+
+fn parse_compound_selector(compound: &str) -> (Option<String>, Option<String>, Vec<String>) {
+    fn commit(
+        mode: char,
+        token: &mut String,
+        tag: &mut Option<String>,
+        id: &mut Option<String>,
+        classes: &mut Vec<String>,
+    ) {
+        if token.is_empty() {
+            return;
+        }
+        let value = std::mem::take(token);
+        match mode {
+            '.' => classes.push(value),
+            '#' => *id = Some(value),
+            _ if value != "*" => *tag = Some(value),
+            _ => {}
+        }
+    }
+
+    let compound = compound.split(':').next().unwrap_or(compound);
+    let mut tag = None;
+    let mut id = None;
+    let mut classes = Vec::new();
+    let mut token = String::new();
+    let mut mode = 't';
+    for character in compound.chars() {
+        match character {
+            '.' | '#' => {
+                commit(mode, &mut token, &mut tag, &mut id, &mut classes);
+                mode = character;
+            }
+            '[' => break,
+            character if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') => {
+                token.push(character)
+            }
+            _ => {}
+        }
+    }
+    commit(mode, &mut token, &mut tag, &mut id, &mut classes);
+    (tag, id, classes)
+}
+
+fn apply_sheet(
+    style: &mut Style,
+    tag: &str,
+    attrs: &HashMap<String, String>,
+    ancestors: &[(String, HashMap<String, String>)],
+    sheet: &[Rule],
+) {
+    fn matches(compound: &Compound, tag: &str, attrs: &HashMap<String, String>) -> bool {
+        let id = attrs.get("id").map(String::as_str).unwrap_or("");
+        let class_attr = attrs.get("class").map(String::as_str).unwrap_or("");
+        let classes: Vec<&str> = class_attr.split_whitespace().collect();
+        compound
+            .tag
+            .as_deref()
+            .is_none_or(|expected| expected.eq_ignore_ascii_case(tag))
+            && compound.id.as_deref().is_none_or(|expected| expected == id)
+            && compound
+                .classes
+                .iter()
+                .all(|class| classes.iter().any(|candidate| candidate == class))
+    }
 
     let mut matching: Vec<&Rule> = sheet
         .iter()
         .filter(|rule| {
-            rule.tag
-                .as_deref()
-                .is_none_or(|expected| expected.eq_ignore_ascii_case(tag))
-                && rule.id.as_deref().is_none_or(|expected| expected == id)
-                && rule
-                    .classes
+            let Some(current) = rule.compounds.last() else {
+                return false;
+            };
+            if !matches(current, tag, attrs) {
+                return false;
+            }
+            let mut ancestor_index = ancestors.len();
+            for required in rule.compounds[..rule.compounds.len() - 1].iter().rev() {
+                let Some(found) = ancestors[..ancestor_index]
                     .iter()
-                    .all(|class| classes.iter().any(|candidate| candidate == class))
+                    .rposition(|(tag, attrs)| matches(required, tag, attrs))
+                else {
+                    return false;
+                };
+                ancestor_index = found;
+            }
+            true
         })
         .collect();
     matching.sort_by_key(|rule| rule.specificity);
@@ -509,10 +728,240 @@ struct GpuiMeasure<'a> {
     text_system: &'a WindowTextSystem,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{
+        Fragment, Images, Node, TextMeasure, browser_file, link_needs_confirmation, parse_to_dom,
+        prepare_document,
+    };
+    use serde_json::{Value, json};
+    use snail_ui::html::FontSpec;
+    use snail_ui::layout;
+
+    struct FakeMeasure;
+    impl TextMeasure for FakeMeasure {
+        fn width(&self, text: &str, font: &FontSpec) -> f32 {
+            text.chars().count() as f32 * font.size * 0.55
+        }
+    }
+
+    fn words(nodes: &[Node]) -> Vec<String> {
+        layout::layout(nodes, 640.0, &FakeMeasure)
+            .words()
+            .map(|(word, _, _, _)| word.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn html_quote_folding_stops_at_the_first_boundary() {
+        let document = prepare_document(
+            "<p>New answer</p><blockquote><p>Old answer</p></blockquote><p>signature</p>",
+        );
+        assert_eq!(
+            words(&parse_to_dom(&document, &Images::default(), false)),
+            ["New", "answer"]
+        );
+        assert_eq!(
+            words(&parse_to_dom(&document, &Images::default(), true)),
+            ["New", "answer", "Old", "answer", "signature"]
+        );
+    }
+
+    #[test]
+    fn phishing_check_only_warns_for_disagreeing_visible_hosts() {
+        assert!(!link_needs_confirmation(
+            "https://example.com/account",
+            "https://example.com/login"
+        ));
+        assert!(link_needs_confirmation(
+            "https://example.com",
+            "https://evil.test/login"
+        ));
+        assert!(!link_needs_confirmation(
+            "Read the story",
+            "https://example.com"
+        ));
+    }
+
+    #[test]
+    fn css_compound_selectors_keep_class_id_and_tag_roles() {
+        assert_eq!(
+            super::parse_compound_selector(".cta"),
+            (None, None, vec!["cta".into()])
+        );
+        assert_eq!(
+            super::parse_compound_selector("td.card#primary:hover"),
+            (
+                Some("td".into()),
+                Some("primary".into()),
+                vec!["card".into()]
+            )
+        );
+    }
+
+    #[test]
+    fn descendant_rules_do_not_leak_and_media_queries_are_dropped() {
+        let document = prepare_document(
+            r#"<head><style>
+                .hidden table { display:none }
+                @media (max-width: 600px) { .mobile { display:none } }
+            </style></head>
+            <table><tr><td>shown</td></tr></table>
+            <div class="hidden"><table><tr><td>hidden</td></tr></table></div>
+            <p class="mobile">desktop</p>"#,
+        );
+        assert_eq!(
+            words(&parse_to_dom(&document, &Images::default(), true)),
+            ["shown", "desktop"]
+        );
+    }
+
+    #[test]
+    fn browser_escape_hatch_writes_only_sanitized_inert_html() {
+        let document = prepare_document(
+            r#"<script>alert(1)</script><img src="https://tracker.test/p.gif"><p>safe</p>"#,
+        );
+        let path = browser_file(&document).unwrap();
+        let output = std::fs::read_to_string(&path).unwrap();
+        assert!(!output.contains("<script"));
+        assert!(!output.contains("https://tracker.test"));
+        assert!(output.contains("snail-remote:"));
+        assert!(output.contains("safe"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn fingerprint(layout: &layout::Layout) -> String {
+        let mut hash = 0xcbf29ce484222325u64;
+        let mut feed = |value: &str| {
+            for byte in value.as_bytes() {
+                hash ^= *byte as u64;
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+        };
+        for fragment in &layout.fragments {
+            let value = match fragment {
+                Fragment::Rect {
+                    rect,
+                    color,
+                    radius,
+                } => format!(
+                    "r:{:.1}:{:.1}:{:.1}:{:.1}:{color:?}:{radius:.1}",
+                    rect.x, rect.y, rect.w, rect.h
+                ),
+                Fragment::Border { rect, color, width } => format!(
+                    "b:{:.1}:{:.1}:{:.1}:{:.1}:{color:?}:{width:.1}",
+                    rect.x, rect.y, rect.w, rect.h
+                ),
+                Fragment::Word {
+                    x,
+                    y,
+                    text,
+                    font,
+                    color,
+                    underline,
+                    href,
+                } => format!(
+                    "w:{x:.1}:{y:.1}:{text}:{:?}:{:.1}:{}:{}:{:?}:{underline}:{href:?}",
+                    font.family, font.size, font.bold, font.italic, color
+                ),
+                Fragment::Image { rect, src } => format!(
+                    "i:{:.1}:{:.1}:{:.1}:{:.1}:{src}",
+                    rect.x, rect.y, rect.w, rect.h
+                ),
+            };
+            feed(&value);
+        }
+        format!("{hash:016x}")
+    }
+
+    fn snapshot(nodes: &[Node], node_count: usize) -> Value {
+        let output = layout::layout_with_limits(
+            nodes,
+            640.0,
+            &FakeMeasure,
+            layout::LayoutLimits {
+                max_nodes: 100_000,
+                max_duration: std::time::Duration::from_secs(2),
+            },
+        )
+        .expect("corpus item must stay inside the renderer budget");
+        json!({
+            "nodes": node_count,
+            "fragments": output.fragments.len(),
+            "height_tenths": (output.height * 10.0).round() as i64,
+            "fingerprint": fingerprint(&output),
+        })
+    }
+
+    #[test]
+    fn e0_3_corpus_box_trees_match_the_checked_in_snapshot() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut actual = serde_json::Map::new();
+        let mut corpus = std::fs::read_dir(root.join("spikes/corpus"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "eml"))
+            .collect::<Vec<_>>();
+        corpus.sort();
+        for path in corpus {
+            let raw = std::fs::read(&path).unwrap();
+            let parsed = snail_core::mime::parse_raw(&raw).unwrap();
+            let value = match parsed.body {
+                snail_core::mime::Body::Html(html) => {
+                    let document = prepare_document(&html);
+                    let nodes = parse_to_dom(&document, &Images::default(), true);
+                    let value = snapshot(&nodes, document.node_count);
+                    assert_ne!(
+                        value["fragments"],
+                        0,
+                        "{} rendered empty; stylesheet:\n{}",
+                        path.display(),
+                        document.stylesheet
+                    );
+                    value
+                }
+                snail_core::mime::Body::Text(text) => {
+                    let nodes = vec![Node::Text(text)];
+                    snapshot(&nodes, 1)
+                }
+                snail_core::mime::Body::None => panic!("{} has no body", path.display()),
+            };
+            actual.insert(
+                path.file_name().unwrap().to_string_lossy().into_owned(),
+                value,
+            );
+        }
+        let regressions = root.join("crates/snail/tests/fixtures/e6-regressions");
+        let mut paths = std::fs::read_dir(regressions)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        paths.sort();
+        for path in paths {
+            let document = prepare_document(&std::fs::read_to_string(&path).unwrap());
+            let nodes = parse_to_dom(&document, &Images::default(), true);
+            actual.insert(
+                path.file_name().unwrap().to_string_lossy().into_owned(),
+                snapshot(&nodes, document.node_count),
+            );
+        }
+        let expected: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/e6-corpus-snapshot.json"))
+                .unwrap();
+        let actual = Value::Object(actual);
+        assert_eq!(
+            actual,
+            expected,
+            "update e6-corpus-snapshot.json only after reviewing this box-tree diff:\n{}",
+            serde_json::to_string_pretty(&actual).unwrap()
+        );
+    }
+}
+
 impl TextMeasure for GpuiMeasure<'_> {
     fn width(&self, text: &str, font: &FontSpec) -> f32 {
         let gpu_font = Font {
-            family: "Helvetica".into(),
+            family: font.family.as_deref().unwrap_or("Helvetica").into(),
             weight: if font.bold {
                 FontWeight::BOLD
             } else {
@@ -533,9 +982,9 @@ impl TextMeasure for GpuiMeasure<'_> {
             underline: None,
             strikethrough: None,
         };
-        let line = self
-            .text_system
-            .shape_line(text.to_string().into(), px(font.size), &[run], None);
+        let line =
+            self.text_system
+                .shape_line(text.to_string().into(), px(font.size), &[run], None);
         line.width().into()
     }
 }

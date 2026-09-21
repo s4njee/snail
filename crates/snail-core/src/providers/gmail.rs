@@ -85,12 +85,7 @@ pub fn parse_history(json: &Value) -> HistoryPage {
             .unwrap_or(0);
         page_max_id = Some(page_max_id.map_or(history_id, |current: u64| current.max(history_id)));
 
-        let mut push = |kind: RecordKind| {
-            records.push(HistoryRecord {
-                history_id,
-                kind,
-            })
-        };
+        let mut push = |kind: RecordKind| records.push(HistoryRecord { history_id, kind });
         for message in array(&entry, "messages") {
             if let Some(id) = message.get("id").and_then(Value::as_str) {
                 push(RecordKind::Added(id.to_string()));
@@ -98,19 +93,45 @@ pub fn parse_history(json: &Value) -> HistoryPage {
         }
         // `messagesDeleted` is a permanent expunge only — trash arrives as a TRASH label change.
         for message in array(&entry, "messagesDeleted") {
-            if let Some(id) = message.get("message").and_then(|m| m.get("id")).and_then(Value::as_str) {
+            if let Some(id) = message
+                .get("message")
+                .and_then(|m| m.get("id"))
+                .and_then(Value::as_str)
+            {
                 push(RecordKind::Deleted(id.to_string()));
             }
         }
         for message in array(&entry, "labelsAdded") {
-            let id = message.get("message").and_then(|m| m.get("id")).and_then(Value::as_str).unwrap_or("");
-            let labels = message.get("labelIds").and_then(Value::as_array).map(|values| strings(values)).unwrap_or_default();
-            push(RecordKind::LabelsAdded { id: id.to_string(), labels });
+            let id = message
+                .get("message")
+                .and_then(|m| m.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let labels = message
+                .get("labelIds")
+                .and_then(Value::as_array)
+                .map(|values| strings(values))
+                .unwrap_or_default();
+            push(RecordKind::LabelsAdded {
+                id: id.to_string(),
+                labels,
+            });
         }
         for message in array(&entry, "labelsRemoved") {
-            let id = message.get("message").and_then(|m| m.get("id")).and_then(Value::as_str).unwrap_or("");
-            let labels = message.get("labelIds").and_then(Value::as_array).map(|values| strings(values)).unwrap_or_default();
-            push(RecordKind::LabelsRemoved { id: id.to_string(), labels });
+            let id = message
+                .get("message")
+                .and_then(|m| m.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let labels = message
+                .get("labelIds")
+                .and_then(Value::as_array)
+                .map(|values| strings(values))
+                .unwrap_or_default();
+            push(RecordKind::LabelsRemoved {
+                id: id.to_string(),
+                labels,
+            });
         }
     }
 
@@ -160,7 +181,9 @@ pub fn classify(status: u16, reason: &str, domain: &str) -> ApiError {
             "domainPolicy" => ApiError::WorkspaceBlocked,
             "usageLimits" => ApiError::Retryable,
             _ => match reason {
-                "rateLimitExceeded" | "userRateLimitExceeded" | "quotaExceeded" => ApiError::Retryable,
+                "rateLimitExceeded" | "userRateLimitExceeded" | "quotaExceeded" => {
+                    ApiError::Retryable
+                }
                 _ => ApiError::Other,
             },
         },
@@ -220,7 +243,11 @@ pub struct GmailError {
 
 impl std::fmt::Display for GmailError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "Gmail {} ({:?}): {}", self.status, self.kind, self.message)
+        write!(
+            formatter,
+            "Gmail {} ({:?}): {}",
+            self.status, self.kind, self.message
+        )
     }
 }
 
@@ -237,9 +264,19 @@ pub struct Profile {
 
 pub fn parse_profile(json: &Value) -> Profile {
     Profile {
-        email: json.get("emailAddress").and_then(Value::as_str).unwrap_or("").to_string(),
-        messages_total: json.get("messagesTotal").and_then(Value::as_u64).unwrap_or(0),
-        threads_total: json.get("threadsTotal").and_then(Value::as_u64).unwrap_or(0),
+        email: json
+            .get("emailAddress")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        messages_total: json
+            .get("messagesTotal")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        threads_total: json
+            .get("threadsTotal")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
         history_id: json
             .get("historyId")
             .and_then(Value::as_str)
@@ -262,11 +299,19 @@ pub fn parse_message_list(json: &Value) -> MessageList {
             .map(|messages| {
                 messages
                     .iter()
-                    .filter_map(|message| message.get("id").and_then(Value::as_str).map(str::to_string))
+                    .filter_map(|message| {
+                        message
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
                     .collect()
             })
             .unwrap_or_default(),
-        next_page_token: json.get("nextPageToken").and_then(Value::as_str).map(str::to_string),
+        next_page_token: json
+            .get("nextPageToken")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         estimate: json.get("resultSizeEstimate").and_then(Value::as_u64),
     }
 }
@@ -290,8 +335,15 @@ pub struct MessageMeta {
 
 pub fn parse_message_meta(json: &Value) -> MessageMeta {
     MessageMeta {
-        id: json.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
-        thread_id: json.get("threadId").and_then(Value::as_str).map(str::to_string),
+        id: json
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        thread_id: json
+            .get("threadId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         label_ids: json
             .get("labelIds")
             .and_then(Value::as_array)
@@ -358,14 +410,11 @@ impl GmailClient {
     }
 
     fn get(&self, url: &str) -> Result<reqwest::blocking::RequestBuilder, GmailError> {
-        let token = self
-            .tokens
-            .access_token()
-            .map_err(|error| GmailError {
-                kind: ApiError::Auth,
-                status: 0,
-                message: error.to_string(),
-            })?;
+        let token = self.tokens.access_token().map_err(|error| GmailError {
+            kind: ApiError::Auth,
+            status: 0,
+            message: error.to_string(),
+        })?;
         Ok(self
             .http
             .get(url)
@@ -392,14 +441,11 @@ impl GmailClient {
     }
 
     fn post_json_once(&self, url: &str, body: Value) -> Result<Value, GmailError> {
-        let token = self
-            .tokens
-            .access_token()
-            .map_err(|error| GmailError {
-                kind: ApiError::Auth,
-                status: 0,
-                message: error.to_string(),
-            })?;
+        let token = self.tokens.access_token().map_err(|error| GmailError {
+            kind: ApiError::Auth,
+            status: 0,
+            message: error.to_string(),
+        })?;
         let response = self
             .http
             .post(url)
@@ -708,11 +754,21 @@ impl MailProvider for GmailClient {
                 RemoteOp::Trash { id } => (id.clone(), vec!["TRASH".to_string()], vec![]),
                 RemoteOp::MarkRead { id, read } => (
                     id.clone(),
-                    if *read { vec![] } else { vec!["UNREAD".to_string()] },
-                    if *read { vec!["UNREAD".to_string()] } else { vec![] },
+                    if *read {
+                        vec![]
+                    } else {
+                        vec!["UNREAD".to_string()]
+                    },
+                    if *read {
+                        vec!["UNREAD".to_string()]
+                    } else {
+                        vec![]
+                    },
                 ),
                 RemoteOp::Label { id, add, remove } => (id.clone(), add.clone(), remove.clone()),
-                RemoteOp::Move { id, mailbox } => (id.clone(), vec![mailbox.clone()], vec!["INBOX".to_string()]),
+                RemoteOp::Move { id, mailbox } => {
+                    (id.clone(), vec![mailbox.clone()], vec!["INBOX".to_string()])
+                }
                 RemoteOp::Send { raw } => {
                     let result = self.send(raw);
                     outcomes.push(OpOutcome {
@@ -789,20 +845,40 @@ mod tests {
     #[test]
     fn gmail_labels_map_to_the_five_mailboxes() {
         let labels = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(mailbox_kind_for_labels(&labels(&["INBOX", "UNREAD"])), MailboxKind::Inbox);
-        assert_eq!(mailbox_kind_for_labels(&labels(&["SENT"])), MailboxKind::Sent);
-        assert_eq!(mailbox_kind_for_labels(&labels(&["DRAFT"])), MailboxKind::Drafts);
-        assert_eq!(mailbox_kind_for_labels(&labels(&["TRASH"])), MailboxKind::Trash);
+        assert_eq!(
+            mailbox_kind_for_labels(&labels(&["INBOX", "UNREAD"])),
+            MailboxKind::Inbox
+        );
+        assert_eq!(
+            mailbox_kind_for_labels(&labels(&["SENT"])),
+            MailboxKind::Sent
+        );
+        assert_eq!(
+            mailbox_kind_for_labels(&labels(&["DRAFT"])),
+            MailboxKind::Drafts
+        );
+        assert_eq!(
+            mailbox_kind_for_labels(&labels(&["TRASH"])),
+            MailboxKind::Trash
+        );
         // Archive is the absence of every system folder (E8.6).
-        assert_eq!(mailbox_kind_for_labels(&labels(&["STARRED", "IMPORTANT"])), MailboxKind::Archive);
+        assert_eq!(
+            mailbox_kind_for_labels(&labels(&["STARRED", "IMPORTANT"])),
+            MailboxKind::Archive
+        );
         assert_eq!(mailbox_kind_for_labels(&labels(&[])), MailboxKind::Archive);
         // Trash wins over a still-present INBOX.
-        assert_eq!(mailbox_kind_for_labels(&labels(&["INBOX", "TRASH"])), MailboxKind::Trash);
+        assert_eq!(
+            mailbox_kind_for_labels(&labels(&["INBOX", "TRASH"])),
+            MailboxKind::Trash
+        );
     }
 
     #[test]
     fn message_meta_parses_thread_and_labels() {
-        let meta = parse_message_meta(&json!({"id": "m1", "threadId": "t1", "labelIds": ["INBOX", "UNREAD"]}));
+        let meta = parse_message_meta(
+            &json!({"id": "m1", "threadId": "t1", "labelIds": ["INBOX", "UNREAD"]}),
+        );
         assert_eq!(meta.id, "m1");
         assert_eq!(meta.thread_id.as_deref(), Some("t1"));
         assert_eq!(meta.label_ids, vec!["INBOX", "UNREAD"]);
@@ -846,7 +922,9 @@ mod tests {
         assert_eq!(page.next_page_token.as_deref(), Some("NEXT"));
         assert!(matches!(&page.records[0].kind, RecordKind::Added(id) if id == "m1"));
         assert!(matches!(&page.records[1].kind, RecordKind::Deleted(id) if id == "m2"));
-        assert!(matches!(&page.records[2].kind, RecordKind::LabelsAdded { labels, .. } if labels == &["STARRED"]));
+        assert!(
+            matches!(&page.records[2].kind, RecordKind::LabelsAdded { labels, .. } if labels == &["STARRED"])
+        );
     }
 
     #[test]
@@ -862,10 +940,16 @@ mod tests {
     #[test]
     fn errors_classify_into_the_right_recovery() {
         assert_eq!(classify(404, "notFound", ""), ApiError::HistoryExpired);
-        assert_eq!(classify(403, "rateLimitExceeded", "usageLimits"), ApiError::Retryable);
+        assert_eq!(
+            classify(403, "rateLimitExceeded", "usageLimits"),
+            ApiError::Retryable
+        );
         assert_eq!(classify(429, "", ""), ApiError::Retryable);
         assert_eq!(classify(503, "", ""), ApiError::Retryable);
-        assert_eq!(classify(403, "", "domainPolicy"), ApiError::WorkspaceBlocked);
+        assert_eq!(
+            classify(403, "", "domainPolicy"),
+            ApiError::WorkspaceBlocked
+        );
         assert_eq!(classify(401, "", ""), ApiError::Auth);
         assert_eq!(classify(400, "badRequest", ""), ApiError::Other);
     }

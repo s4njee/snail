@@ -23,3 +23,8 @@ reqwest = { version = "0.12", default-features = false, features = [
     "gzip",
 ] }
 base64 = "0.22"
+ammonia = "4"
+html5ever = "0.27"
+markup5ever_rcdom = "0.3"
+encoding_rs = "0.8"
+quoted_printable = "0.5"

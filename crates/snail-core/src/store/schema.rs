@@ -366,7 +366,8 @@ mod tests {
             [],
         )
         .unwrap();
-        conn.execute("DELETE FROM account WHERE id = 1", []).unwrap();
+        conn.execute("DELETE FROM account WHERE id = 1", [])
+            .unwrap();
         let left: i64 = conn
             .query_row("SELECT count(*) FROM message", [], |r| r.get(0))
             .unwrap();

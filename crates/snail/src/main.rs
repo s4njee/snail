@@ -33,7 +33,11 @@ fn main() {
     let paths = Paths::resolve();
     let _ = paths.ensure();
     let _ = snail_core::paths::init_logging(&paths);
-    log::info!("snail starting; config={:?} cache={:?}", paths.config, paths.cache);
+    log::info!(
+        "snail starting; config={:?} cache={:?}",
+        paths.config,
+        paths.cache
+    );
     startup::mark("paths_and_logging");
 
     let theme_pref = settings::load(&paths);
@@ -50,7 +54,12 @@ fn main() {
 
     // Benchmark and fixture modes never open a window (E0.9, E2.9, E17.1).
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|arg| arg == "--generate-fixture" || arg == "--bench-store" || arg == "--backfill-gmail" || arg == "--import-eml") {
+    if args.iter().any(|arg| {
+        arg == "--generate-fixture"
+            || arg == "--bench-store"
+            || arg == "--backfill-gmail"
+            || arg == "--import-eml"
+    }) {
         if let Err(error) = run_store_cli(&paths, &args) {
             eprintln!("{error:#}");
             std::process::exit(1);
@@ -60,7 +69,9 @@ fn main() {
     if args.iter().any(|arg| arg == "--fixture") {
         let store = Store::open(&paths).expect("open the fixture store");
         let count: i64 = store
-            .with_db(|conn| Ok(conn.query_row("SELECT count(*) FROM message", [], |row| row.get(0))?))
+            .with_db(|conn| {
+                Ok(conn.query_row("SELECT count(*) FROM message", [], |row| row.get(0))?)
+            })
             .unwrap_or(0);
         if count == 0 {
             let report = snail_core::fixture::generate(&store, &FixtureSpec::default())
@@ -164,7 +175,10 @@ fn run_store_cli(paths: &Paths, args: &[String]) -> anyhow::Result<()> {
 
         let client = GmailClient::new(Arc::new(FixedToken(tokens.access_token)))?;
         let profile = client.profile()?;
-        println!("authenticated as {} ({} messages)", profile.email, profile.messages_total);
+        println!(
+            "authenticated as {} ({} messages)",
+            profile.email, profile.messages_total
+        );
 
         let store = Store::open(paths)?;
         let account_id = match store.account_by_address("gmail", &profile.email)? {

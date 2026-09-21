@@ -443,12 +443,14 @@ impl Store {
     /// Insert only if this provider id is new; used by backfill so a re-run converges (E4.23).
     pub fn insert_message_if_new(&self, message: &NewMessage) -> Result<bool> {
         match &message.provider {
-            Some(ProviderRef::Gmail { id, .. }) if self.gmail_message_exists(message.account_id, id)? => {
+            Some(ProviderRef::Gmail { id, .. })
+                if self.gmail_message_exists(message.account_id, id)? =>
+            {
                 return Ok(false);
             }
-            Some(ProviderRef::Imap { uid, uidvalidity, .. })
-                if self.imap_message_exists(message.account_id, *uid, *uidvalidity)? =>
-            {
+            Some(ProviderRef::Imap {
+                uid, uidvalidity, ..
+            }) if self.imap_message_exists(message.account_id, *uid, *uidvalidity)? => {
                 return Ok(false);
             }
             _ => {}
@@ -468,12 +470,7 @@ impl Store {
         })
     }
 
-    pub fn imap_message_exists(
-        &self,
-        account_id: i64,
-        uid: u32,
-        uidvalidity: u32,
-    ) -> Result<bool> {
+    pub fn imap_message_exists(&self, account_id: i64, uid: u32, uidvalidity: u32) -> Result<bool> {
         self.with_db(|conn| {
             let count: i64 = conn.query_row(
                 "SELECT count(*) FROM message
@@ -684,9 +681,8 @@ impl Store {
     }
     pub fn accounts(&self) -> Result<Vec<AccountRow>> {
         self.with_db(|conn| {
-            let mut statement = conn.prepare(
-                "SELECT id, kind, address, display_name FROM account ORDER BY id",
-            )?;
+            let mut statement =
+                conn.prepare("SELECT id, kind, address, display_name FROM account ORDER BY id")?;
             let rows = statement.query_map([], |row| {
                 Ok(AccountRow {
                     id: row.get(0)?,
@@ -813,7 +809,11 @@ mod tests {
 
         let subject: String = store
             .with_db(|conn| {
-                Ok(conn.query_row("SELECT subject FROM message WHERE id = ?1", [id], |r| r.get(0))?)
+                Ok(
+                    conn.query_row("SELECT subject FROM message WHERE id = ?1", [id], |r| {
+                        r.get(0)
+                    })?,
+                )
             })
             .unwrap();
         assert_eq!(subject, "Hello");
@@ -842,10 +842,7 @@ mod tests {
         let store = store_with_account();
         store
             .transaction(|tx| {
-                tx.execute(
-                    "UPDATE message SET unread = 0 WHERE id = 1",
-                    [],
-                )?;
+                tx.execute("UPDATE message SET unread = 0 WHERE id = 1", [])?;
                 tx.execute(
                     "INSERT INTO pending_op (account_id, target_kind, target_id, operation,
                         idempotency_key, attempts, state, created_at, updated_at)
@@ -884,7 +881,13 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        assert!(store.get_sync_state(1, "gmail", "").unwrap().unwrap().full_resync_needed);
+        assert!(
+            store
+                .get_sync_state(1, "gmail", "")
+                .unwrap()
+                .unwrap()
+                .full_resync_needed
+        );
     }
 
     #[test]
@@ -892,7 +895,11 @@ mod tests {
         let store = store_with_account();
         assert_eq!(store.accounts().unwrap().len(), 1);
         assert_eq!(
-            store.account_by_address("gmail", "me@example.com").unwrap().unwrap().id,
+            store
+                .account_by_address("gmail", "me@example.com")
+                .unwrap()
+                .unwrap()
+                .id,
             1
         );
         store
@@ -940,7 +947,10 @@ mod tests {
             ..Default::default()
         };
         assert!(store.insert_message_if_new(&message).unwrap());
-        assert!(!store.insert_message_if_new(&message).unwrap(), "re-run must not duplicate");
+        assert!(
+            !store.insert_message_if_new(&message).unwrap(),
+            "re-run must not duplicate"
+        );
     }
 
     #[test]

@@ -44,7 +44,11 @@ pub fn mark(name: &'static str) {
 /// Every mark recorded so far, for the dev overlay.
 #[allow(dead_code)] // Read by the E0.8 dev overlay; kept as the stable accessor.
 pub fn snapshot() -> Vec<(&'static str, f64)> {
-    timeline().lock().expect("startup lock poisoned").marks.clone()
+    timeline()
+        .lock()
+        .expect("startup lock poisoned")
+        .marks
+        .clone()
 }
 
 /// A one-line `gpui_init=12.3ms first_frame=140.1ms` summary.
@@ -73,8 +77,14 @@ mod tests {
         mark("gpui_init");
         mark("shell_built");
         let marks = snapshot();
-        let first = marks.iter().rposition(|(name, _)| *name == "gpui_init").unwrap();
-        let second = marks.iter().rposition(|(name, _)| *name == "shell_built").unwrap();
+        let first = marks
+            .iter()
+            .rposition(|(name, _)| *name == "gpui_init")
+            .unwrap();
+        let second = marks
+            .iter()
+            .rposition(|(name, _)| *name == "shell_built")
+            .unwrap();
         assert!(first < second, "gpui_init should precede shell_built");
         assert!(marks[second].1 >= marks[first].1);
     }

@@ -119,6 +119,9 @@ mod tests {
             resolve_kind("Deleted Messages", &attrs(&["\\Trash"])),
             MailboxKind::Trash
         );
-        assert_eq!(resolve_kind("Sent Messages", &attrs(&[])), MailboxKind::Sent);
+        assert_eq!(
+            resolve_kind("Sent Messages", &attrs(&[])),
+            MailboxKind::Sent
+        );
     }
 }

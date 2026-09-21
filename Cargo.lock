@@ -5601,6 +5601,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "quoted_printable"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "478e0585659a122aa407eb7e3c0e1fa51b1d8a870038bd29f0cf4a8551eea972"
+
+[[package]]
 name = "r-efi"
 version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6709,18 +6715,15 @@ dependencies = [
 name = "snail"
 version = "0.1.0"
 dependencies = [
- "ammonia",
  "anyhow",
  "env_logger",
  "futures",
  "gpui-kit",
  "gpui-pre",
  "gpui-pre-platform",
- "html5ever 0.27.0",
  "image",
  "libc",
  "log",
- "markup5ever_rcdom",
  "reqwest",
  "serde",
  "serde_json",
@@ -6733,12 +6736,17 @@ dependencies = [
 name = "snail-core"
 version = "0.1.0"
 dependencies = [
+ "ammonia",
  "anyhow",
  "base64 0.22.1",
  "dirs 6.0.0",
+ "encoding_rs",
  "env_logger",
+ "html5ever 0.27.0",
  "log",
  "mail-parser",
+ "markup5ever_rcdom",
+ "quoted_printable",
  "reqwest",
  "rusqlite",
  "serde",

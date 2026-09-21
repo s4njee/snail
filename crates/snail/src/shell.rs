@@ -13,7 +13,7 @@ use snail_ui::selection::Selection;
 use snail_ui::text::TextRole;
 
 use crate::dev_overlay::DevOverlay;
-use crate::icons::{icon, Icon};
+use crate::icons::{Icon, icon};
 use crate::mail_model::{MailModel, MailboxRow, MessageRow};
 use crate::settings;
 use crate::style::{self, ThemePref};
@@ -24,23 +24,30 @@ const PAGE: u32 = 200;
 struct Reading {
     subject: String,
     from: String,
+    sender_addr: Option<String>,
     meta: String,
     body: BodyKind,
 }
 
 enum BodyKind {
-    Plain(String),
+    Plain {
+        visible: String,
+        quoted: Option<String>,
+        expanded: bool,
+    },
     Html {
-        html: String,
+        document: snail_core::html::SanitizedDocument,
         view: crate::html_view::HtmlView,
         images: crate::html_view::Images,
+        quotes_collapsed: bool,
+        has_quotes: bool,
     },
 }
 
 /// A remote image fetched on the background executor, waiting to be turned into a gpui image.
 struct RemoteImage {
     generation: u64,
-    url: String,
+    token: String,
     width: f32,
     height: f32,
     bgra: Vec<u8>,
@@ -60,6 +67,10 @@ pub struct Shell {
     remote_enabled: bool,
     pending_remote: Vec<RemoteImage>,
     generation: u64,
+    reading_scroll: ScrollHandle,
+    /// Set when the user clicks "Load images" for the current message (E6.2), independent of the
+    /// global switch and the per-sender allowance.
+    forced_message: Option<i64>,
 }
 
 impl Shell {
@@ -85,6 +96,8 @@ impl Shell {
             remote_enabled: std::env::var_os("SNAIL_REMOTE_IMAGES").is_some(),
             pending_remote: Vec::new(),
             generation: 0,
+            reading_scroll: ScrollHandle::new(),
+            forced_message: None,
         };
         shell.reload(window, cx);
         shell
@@ -127,20 +140,34 @@ impl Shell {
     fn load_reading(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.generation += 1;
         self.pending_remote.clear();
-        self.reading = self.selection.cursor().and_then(|id| self.read_message(id, window));
+        self.reading_scroll.set_offset(point(px(0.0), px(0.0)));
+        self.reading = self
+            .selection
+            .cursor()
+            .and_then(|id| self.read_message(id, window, cx));
 
         // If a message has remote images and the user has unblocked them, fetch on the background
         // executor; the result lands in `pending_remote` and is applied on the next render (E6.8).
-        if !self.remote_enabled {
+        let sender_allowed = self
+            .reading
+            .as_ref()
+            .and_then(|reading| reading.sender_addr.as_deref())
+            .is_some_and(|sender| settings::always_load_images_from(sender, cx));
+        if !self.remote_enabled && !sender_allowed && self.forced_message != self.selection.cursor() {
             return;
         }
         let urls = match &self.reading {
             Some(Reading {
-                body: BodyKind::Html { html, images, .. },
+                body: BodyKind::Html {
+                    document, images, ..
+                },
                 ..
-            }) => crate::html_view::remote_image_urls(html)
+            }) => document
+                .remote_resources
+                .iter()
+                .map(|resource| (resource.token.clone(), resource.url.clone()))
                 .into_iter()
-                .filter(|url| !images.contains(url))
+                .filter(|(token, _)| !images.contains(token))
                 .collect::<Vec<_>>(),
             _ => Vec::new(),
         };
@@ -150,17 +177,17 @@ impl Shell {
         }
     }
 
-    fn fetch_remote(&mut self, urls: Vec<String>, cx: &mut Context<Self>) {
+    fn fetch_remote(&mut self, urls: Vec<(String, String)>, cx: &mut Context<Self>) {
         let mail = self.mail.clone();
         let generation = self.generation;
         let task = cx.background_executor().spawn(async move {
             let mut out = Vec::new();
-            for url in urls {
+            for (token, url) in urls {
                 if let Some(bytes) = mail.fetch_remote_image(&url) {
                     if let Some((width, height, bgra)) = crate::html_view::decode_to_bgra(&bytes) {
                         out.push(RemoteImage {
                             generation,
-                            url,
+                            token,
                             width,
                             height,
                             bgra,
@@ -184,7 +211,7 @@ impl Shell {
 
     /// Turn fetched remote images into gpui images and re-lay out the reading pane. Runs in render,
     /// where the window is available for text metrics.
-    fn apply_pending_images(&mut self, window: &mut Window) {
+    fn apply_pending_images(&mut self, window: &mut Window, cx: &mut App) {
         if self.pending_remote.is_empty() {
             return;
         }
@@ -192,7 +219,14 @@ impl Shell {
         let generation = self.generation;
         let mut applied = 0;
         if let Some(Reading {
-            body: BodyKind::Html { html, view, images },
+            body:
+                BodyKind::Html {
+                    document,
+                    view,
+                    images,
+                    quotes_collapsed,
+                    ..
+                },
             ..
         }) = &mut self.reading
         {
@@ -200,20 +234,35 @@ impl Shell {
                 if remote.generation != generation {
                     continue;
                 }
-                let render = crate::html_view::render_image(remote.width, remote.height, remote.bgra);
-                images.insert_remote(&remote.url, remote.width, remote.height, render);
+                let render =
+                    crate::html_view::render_image(remote.width, remote.height, remote.bgra);
+                images.insert_remote(&remote.token, remote.width, remote.height, render);
                 applied += 1;
             }
-            *view = crate::html_view::layout_html(html, 640.0, window, images);
+            let selection = view.selection();
+            if let Ok(updated) = crate::html_view::layout_document(
+                document,
+                640.0,
+                window,
+                images,
+                Some(selection),
+                !*quotes_collapsed,
+                cx,
+            ) {
+                *view = updated;
+            }
         }
         if applied > 0 {
             log::info!("remote: applied {applied} image(s)");
         }
     }
 
-    fn read_message(&self, id: i64, window: &mut Window) -> Option<Reading> {
+    fn read_message(&self, id: i64, window: &mut Window, cx: &mut App) -> Option<Reading> {
         let row = self.mail.message(id)?;
-        let parsed = self.mail.parsed(id)?;
+        let parsed = self
+            .mail
+            .parsed_with_preference(id, settings::body_preference(cx))?;
+        let fallback_plain = parsed.plain.clone();
         let body = match parsed.body {
             snail_core::mime::Body::Html(html) => {
                 let images = match self.mail.raw(id) {
@@ -221,28 +270,116 @@ impl Shell {
                     None => crate::html_view::Images::default(),
                 };
                 // 640px is roughly the reading pane's content width at the default window size.
-                let view = crate::html_view::layout_html(&html, 640.0, window, &images);
-                BodyKind::Html { html, view, images }
+                let document = crate::html_view::prepare_document(&html);
+                let has_quotes = crate::html_view::has_quoted_content(&document);
+                match crate::html_view::layout_document(
+                    &document,
+                    640.0,
+                    window,
+                    &images,
+                    None,
+                    !has_quotes,
+                    cx,
+                ) {
+                    Ok(view) => BodyKind::Html {
+                        document,
+                        view,
+                        images,
+                        quotes_collapsed: has_quotes,
+                        has_quotes,
+                    },
+                    Err(error) => {
+                        log::warn!("html layout fallback: {error:?}");
+                        plain_body(
+                            fallback_plain
+                                .filter(|text| !text.trim().is_empty())
+                                .unwrap_or_else(|| document.plain_text.clone()),
+                        )
+                    }
+                }
             }
-            _ => BodyKind::Plain(
+            _ => plain_body(
                 parsed
                     .plain
                     .filter(|text| !text.trim().is_empty())
                     .unwrap_or_else(|| "(This message has no readable text part.)".to_string()),
             ),
         };
+        let sender_addr = row.from_addr.clone();
         Some(Reading {
             subject: row.subject.unwrap_or_else(|| "(no subject)".into()),
             from: row
                 .from_name
                 .or(row.from_addr)
                 .unwrap_or_else(|| "(unknown sender)".into()),
+            sender_addr,
             meta: row
                 .date
                 .map(|date| format!("{date}"))
                 .unwrap_or_else(|| "(no date)".into()),
             body,
         })
+    }
+
+    fn expand_quotes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(reading) = &mut self.reading else {
+            return;
+        };
+        match &mut reading.body {
+            BodyKind::Plain { expanded, .. } => *expanded = true,
+            BodyKind::Html {
+                document,
+                view,
+                images,
+                quotes_collapsed,
+                ..
+            } => {
+                let selection = view.selection();
+                match crate::html_view::layout_document(
+                    document,
+                    640.0,
+                    window,
+                    images,
+                    Some(selection),
+                    true,
+                    cx,
+                ) {
+                    Ok(updated) => {
+                        *view = updated;
+                        *quotes_collapsed = false;
+                    }
+                    Err(error) => log::warn!("could not expand quoted text: {error:?}"),
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn allow_sender_images(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(sender) = self
+            .reading
+            .as_ref()
+            .and_then(|reading| reading.sender_addr.clone())
+        else {
+            return;
+        };
+        settings::allow_images_from(&sender, cx);
+        self.load_reading(window, cx);
+        cx.notify();
+    }
+
+    fn open_current_in_browser(&self, cx: &mut App) {
+        let Some(Reading {
+            body: BodyKind::Html { document, .. },
+            ..
+        }) = &self.reading
+        else {
+            return;
+        };
+        match crate::html_view::browser_file(document) {
+            Ok(path) => cx.open_with_system(&path),
+            Err(error) => log::warn!("could not write browser message: {error}"),
+        }
     }
 
     fn titlebar(palette: &snail_ui::theme::Theme, _window: &mut Window, cx: &App) -> AnyElement {
@@ -375,7 +512,9 @@ impl Shell {
             .px_2()
             .py_1()
             .rounded(px(palette.radii.button))
-            .when(selected, |this| this.bg(style::color(palette.colors.accent_tint_deep)))
+            .when(selected, |this| {
+                this.bg(style::color(palette.colors.accent_tint_deep))
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event, window, cx| {
@@ -384,7 +523,12 @@ impl Shell {
                 }),
             )
             .child(icon(glyph).text_color(style::color(icon_color)))
-            .child(div().flex_1().min_w_0().child(style::text(mailbox.name, role, cx)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(style::text(mailbox.name, role, cx)),
+            )
             .when(mailbox.unread > 0, |this| {
                 this.child(
                     div()
@@ -487,8 +631,12 @@ impl Shell {
         let subject = row.subject.clone().unwrap_or_else(|| "(no subject)".into());
         let preview = row.preview.clone().unwrap_or_default();
         let unread = row.unread;
-        let subject = snail_ui::preview::clamp(&subject, 1, 300.0, &|line| line.chars().count() as f32 * 7.0);
-        let preview = snail_ui::preview::clamp(&preview, 2, 300.0, &|line| line.chars().count() as f32 * 6.5);
+        let subject = snail_ui::preview::clamp(&subject, 1, 300.0, &|line| {
+            line.chars().count() as f32 * 7.0
+        });
+        let preview = snail_ui::preview::clamp(&preview, 2, 300.0, &|line| {
+            line.chars().count() as f32 * 6.5
+        });
 
         let base = div()
             .relative()
@@ -500,7 +648,9 @@ impl Shell {
             .py_3()
             .border_b_1()
             .border_color(style::color(palette.colors.border_hairline))
-            .when(selected, |this| this.bg(style::color(palette.colors.accent_tint)))
+            .when(selected, |this| {
+                this.bg(style::color(palette.colors.accent_tint))
+            })
             .when(!selected, |this| this.hover(|s| s.bg(rgba(0x00000008))))
             .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                 weak.update(cx, |this, cx| {
@@ -560,9 +710,49 @@ impl Shell {
         .into_any_element()
     }
 
-    fn reading_pane(&self, palette: &snail_ui::theme::Theme, cx: &App) -> AnyElement {
+    fn reading_pane(&self, palette: &snail_ui::theme::Theme, cx: &mut Context<Self>) -> AnyElement {
         let Some(reading) = &self.reading else {
             return Self::empty_state(palette, cx, EmptyState::EmptyMailbox);
+        };
+        let is_html = matches!(&reading.body, BodyKind::Html { .. });
+        let unloaded_remote = matches!(
+            &reading.body,
+            BodyKind::Html { document, images, .. }
+                if document.remote_resources.iter().any(|resource| !images.contains(&resource.token))
+        );
+        let sender_allowed = reading
+            .sender_addr
+            .as_deref()
+            .is_some_and(|sender| settings::always_load_images_from(sender, cx));
+        let has_blocked_remote = unloaded_remote
+            && !self.remote_enabled
+            && !sender_allowed
+            && self.forced_message != self.selection.cursor();
+        let quotes_collapsed = match &reading.body {
+            BodyKind::Plain {
+                quoted, expanded, ..
+            } => quoted.is_some() && !expanded,
+            BodyKind::Html {
+                quotes_collapsed,
+                has_quotes,
+                ..
+            } => *has_quotes && *quotes_collapsed,
+        };
+        let preference_label = match settings::body_preference(cx) {
+            snail_core::mime::BodyPreference::Html => "Prefer plain text",
+            snail_core::mime::BodyPreference::Plain => "Prefer HTML",
+        };
+        let action = |label: &str| {
+            div()
+                .px_2()
+                .py_1()
+                .rounded(px(palette.radii.button))
+                .border_1()
+                .border_color(style::color(palette.colors.border_soft))
+                .text_size(px(11.0))
+                .text_color(style::color(palette.colors.secondary))
+                .hover(|this| this.bg(style::color(palette.colors.sunken)))
+                .child(label.to_string())
         };
         div()
             .flex_1()
@@ -580,7 +770,11 @@ impl Shell {
                     .py_5()
                     .border_b_1()
                     .border_color(style::color(palette.colors.border_hairline))
-                    .child(style::text(reading.subject.clone(), TextRole::ReadingSubject, cx))
+                    .child(style::text(
+                        reading.subject.clone(),
+                        TextRole::ReadingSubject,
+                        cx,
+                    ))
                     .child(
                         div()
                             .flex()
@@ -596,7 +790,11 @@ impl Shell {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .child(style::text(initials(&reading.from), TextRole::MailboxPill, cx)),
+                                    .child(style::text(
+                                        initials(&reading.from),
+                                        TextRole::MailboxPill,
+                                        cx,
+                                    )),
                             )
                             .child(
                                 div()
@@ -613,6 +811,45 @@ impl Shell {
                                         cx,
                                     )),
                             ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(action(preference_label).on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    settings::toggle_body_preference(cx);
+                                    this.load_reading(window, cx);
+                                    cx.notify();
+                                }),
+                            ))
+                            .when(is_html, |this| {
+                                this.child(action("Open in browser").on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _window, cx| {
+                                        this.open_current_in_browser(cx);
+                                    }),
+                                ))
+                            })
+                            .when(has_blocked_remote, |this| {
+                                this.child(action("Load images").on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, window, cx| {
+                                        this.forced_message = this.selection.cursor();
+                                        this.load_reading(window, cx);
+                                        cx.notify();
+                                    }),
+                                ))
+                                .child(
+                                    action("Always load images from this sender").on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, window, cx| {
+                                            this.allow_sender_images(window, cx);
+                                        }),
+                                    ),
+                                )
+                            }),
                     ),
             )
             .child(
@@ -621,25 +858,65 @@ impl Shell {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .track_scroll(&self.reading_scroll)
                     .px_6()
                     .py_5()
-                    .child(match &reading.body {
-                        BodyKind::Html { view, images, .. } => {
-                            crate::html_view::paint(view, images).into_any_element()
-                        }
-                        BodyKind::Plain(text) => {
-                            style::text(text.clone(), TextRole::BodySerif, cx).into_any_element()
-                        }
-                    }),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(match &reading.body {
+                                BodyKind::Html { view, images, .. } => {
+                                    let visible_top: f32 = (-self.reading_scroll.offset().y).into();
+                                    let visible_height: f32 =
+                                        self.reading_scroll.bounds().size.height.into();
+                                    crate::html_view::paint(
+                                        view,
+                                        images,
+                                        visible_top,
+                                        visible_height,
+                                    )
+                                    .into_any_element()
+                                }
+                                BodyKind::Plain {
+                                    visible,
+                                    quoted,
+                                    expanded,
+                                } => {
+                                    let text = if *expanded {
+                                        quoted
+                                            .as_ref()
+                                            .map(|quoted| format!("{visible}\n{quoted}"))
+                                            .unwrap_or_else(|| visible.clone())
+                                    } else {
+                                        visible.clone()
+                                    };
+                                    gpui_kit::component::text::TextView::markdown(
+                                        "plain-message-body",
+                                        text,
+                                    )
+                                    .selectable(true)
+                                    .scrollable(false)
+                                    .font_family("Newsreader")
+                                    .text_size(px(15.0))
+                                    .into_any_element()
+                                }
+                            })
+                            .when(quotes_collapsed, |this| {
+                                this.child(action("•••  Show quoted text").on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, window, cx| {
+                                        this.expand_quotes(window, cx);
+                                    }),
+                                ))
+                            }),
+                    ),
             )
             .into_any_element()
     }
 
-    fn empty_state(
-        palette: &snail_ui::theme::Theme,
-        cx: &App,
-        state: EmptyState,
-    ) -> AnyElement {
+    fn empty_state(palette: &snail_ui::theme::Theme, cx: &App, state: EmptyState) -> AnyElement {
         let copy = snail_ui::empty::copy(state);
         let glyph = match copy.icon {
             snail_ui::empty::IconHint::Envelope => Icon::Envelope,
@@ -668,6 +945,15 @@ impl Shell {
     }
 }
 
+fn plain_body(text: String) -> BodyKind {
+    let folded = snail_core::mime::fold_plain_quotes(&text);
+    BodyKind::Plain {
+        visible: folded.visible,
+        quoted: folded.quoted,
+        expanded: false,
+    }
+}
+
 fn initials(name: &str) -> String {
     name.split_whitespace()
         .filter_map(|word| word.chars().next())
@@ -679,7 +965,7 @@ fn initials(name: &str) -> String {
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Apply any remote images that arrived since the last frame, then re-lay out (E6.8).
-        self.apply_pending_images(window);
+        self.apply_pending_images(window, cx);
         let palette = style::palette(cx);
 
         let overlay = if self.overlay.visible {
@@ -740,6 +1026,10 @@ impl Render for Shell {
                     // F4 toggles remote images (E6.2's unblock), for now a global switch.
                     "f4" => {
                         this.remote_enabled = !this.remote_enabled;
+                        this.load_reading(window, cx);
+                    }
+                    "f5" => {
+                        settings::toggle_body_preference(cx);
                         this.load_reading(window, cx);
                     }
                     _ => return,

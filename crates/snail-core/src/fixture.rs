@@ -161,7 +161,11 @@ pub fn generate(store: &Store, spec: &FixtureSpec) -> Result<FixtureReport> {
             tx.execute(
                 "INSERT INTO calendar (id, account_id, provider, remote_id, name, color)
                  VALUES (?1, ?2, 'google', ?3, 'Primary', '#2c5fb8')",
-                params![account as i64 + 1, account as i64 + 1, format!("cal{account}")],
+                params![
+                    account as i64 + 1,
+                    account as i64 + 1,
+                    format!("cal{account}")
+                ],
             )?;
         }
         {
@@ -257,12 +261,9 @@ pub fn benchmark(store: &Store) -> Result<BenchReport> {
 
     let started = Instant::now();
     let _ = store.with_db(|conn| {
-        let mut statement = conn.prepare(
-            "SELECT id, subject, date FROM message WHERE message_id = ?1 ORDER BY date",
-        )?;
-        let rows = statement.query_map(["<msg-7@example.com>"], |row| {
-            Ok(row.get::<_, i64>(0)?)
-        })?;
+        let mut statement = conn
+            .prepare("SELECT id, subject, date FROM message WHERE message_id = ?1 ORDER BY date")?;
+        let rows = statement.query_map(["<msg-7@example.com>"], |row| Ok(row.get::<_, i64>(0)?))?;
         let count = rows.collect::<rusqlite::Result<Vec<_>>>()?.len();
         Ok(count)
     })?;

@@ -96,9 +96,8 @@ fn override_for(key: &str, get: &mut impl FnMut(&str) -> Option<OsString>) -> Op
 pub fn init_logging(paths: &Paths) -> io::Result<()> {
     paths.ensure()?;
     let writer = RotatingWriter::new(paths.log_file(), LOG_MAX_BYTES)?;
-    let mut builder = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info"),
-    );
+    let mut builder =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
     builder.target(env_logger::Target::Pipe(Box::new(writer)));
     builder
         .try_init()
@@ -192,9 +191,7 @@ mod tests {
 
     #[test]
     fn empty_override_is_ignored() {
-        let paths = Paths::from_env(|key| {
-            (key == CONFIG_ENV).then(|| OsString::from(""))
-        });
+        let paths = Paths::from_env(|key| (key == CONFIG_ENV).then(|| OsString::from("")));
         assert_ne!(paths.config, PathBuf::from(""));
     }
 

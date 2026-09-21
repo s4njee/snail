@@ -41,7 +41,10 @@ impl SettingsStore {
             log::warn!("settings/{section}: not JSON, using defaults");
             return T::default();
         };
-        let version = envelope.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
+        let version = envelope
+            .get("version")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         if version != VERSION as u64 {
             log::warn!("settings/{section}: version {version} != {VERSION}, using defaults");
             return T::default();
@@ -90,19 +93,19 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        (
-            SettingsStore {
-                dir: dir.clone(),
-            },
-            dir,
-        )
+        (SettingsStore { dir: dir.clone() }, dir)
     }
 
     #[test]
     fn round_trips() {
         let (store, dir) = store();
         store
-            .save("theme", &Section { mode: "dark".into() })
+            .save(
+                "theme",
+                &Section {
+                    mode: "dark".into(),
+                },
+            )
             .unwrap();
         assert_eq!(store.load::<Section>("theme").mode, "dark");
         let _ = std::fs::remove_dir_all(&dir);
@@ -113,7 +116,11 @@ mod tests {
         let (store, dir) = store();
         std::fs::write(store.file("theme"), "{ not json").unwrap();
         assert_eq!(store.load::<Section>("theme"), Section::default());
-        std::fs::write(store.file("theme"), r#"{"version": 99, "data": {"mode": "dark"}}"#).unwrap();
+        std::fs::write(
+            store.file("theme"),
+            r#"{"version": 99, "data": {"mode": "dark"}}"#,
+        )
+        .unwrap();
         assert_eq!(store.load::<Section>("theme"), Section::default());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -128,7 +135,14 @@ mod tests {
     #[test]
     fn save_leaves_no_temp_file_behind() {
         let (store, dir) = store();
-        store.save("theme", &Section { mode: "light".into() }).unwrap();
+        store
+            .save(
+                "theme",
+                &Section {
+                    mode: "light".into(),
+                },
+            )
+            .unwrap();
         assert!(!store.file("theme").with_extension("json.tmp").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
