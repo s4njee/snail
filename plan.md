@@ -995,7 +995,19 @@ corpus plus NYT/LinkedIn regressions is checked in as deterministic box-tree sna
 ### E7 — Compose, reply and send
 *Screen 1c, 620×520, plus the inline reply box in 1b.*
 
-- [ ] 7.1 — Compose window as a second GPUI window (not a modal) so it survives navigation. From
+*First cut done (2026-09-21): `snail-core::compose` builds RFC822 with `mail-builder` and derives
+replies and forwards — `In-Reply-To`, a deduplicated `References` chain, reply-all that excludes the
+user and the original sender, subject de-duplication, and a `> `-quoted attribution (7.4), all
+unit-tested and round-tripped through the parser. The app has a real **compose window** (7.1, a second
+window, not a modal) with To/Cc/Subject `Input`s and a body `Textarea`, opened with **c** (new), **r**
+(reply), **f** (forward), or the Reply/Forward buttons in the reading header. Send builds the raw
+message, puts it in the content-addressed cache, and **parks a `send` op in `pending_op`** (7.10/7.11
+first half) — with no account token wired yet, nothing leaves the machine. Remaining: recipient tokens
+(7.2), contacts autocomplete (7.3), the inline reply box (7.5), draft autosave (7.6), attachments
+(7.7), an HTML format bar (7.8), the signature (7.9), the undo-send countdown (7.10), and actually
+dispatching sends per provider (7.11/7.12).*
+
+- [x] 7.1 — Compose window as a second GPUI window (not a modal) so it survives navigation. From
       picker, To/Cc/Bcc, Subject, body, format bar, Send. Built on whatever E0.2 concluded about
       `Textarea`.
 - [ ] 7.2 — Recipient tokens per handoff: 18px avatar + name pill, r20, `#e2eaf7`/`#1d4489`,
@@ -1003,7 +1015,7 @@ corpus plus NYT/LinkedIn regressions is checked in as deterministic box-tree sna
       (undesigned — E1.9).
 - [ ] 7.3 — Address autocomplete from a local contacts table built by harvesting From/To/Cc of
       every synced message with a frequency-and-recency score. **No contacts API, no network.**
-- [ ] 7.4 — Reply / Reply-all / Forward: correct `In-Reply-To` and `References`, recipient
+- [x] 7.4 — Reply / Reply-all / Forward: correct `In-Reply-To` and `References`, recipient
       derivation (including `Reply-To` and list headers), attribution line, quoted body, and
       forwarded-message attachment handling.
 - [ ] 7.5 — Inline reply box in the thread view (handoff 1b): collapsed placeholder that expands in

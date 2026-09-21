@@ -710,6 +710,29 @@ impl Shell {
         .into_any_element()
     }
 
+    fn compose_reply(&mut self, all: bool, cx: &mut Context<Self>) {
+        let Some(id) = self.selection.cursor() else {
+            return;
+        };
+        let Some(parsed) = self.mail.parsed(id) else {
+            return;
+        };
+        let self_addr = self.mail.first_account_address();
+        let draft = snail_core::compose::reply(&parsed, self_addr.as_deref(), all);
+        crate::compose::open(self.mail.clone(), draft, cx);
+    }
+
+    fn compose_forward(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.selection.cursor() else {
+            return;
+        };
+        let Some(parsed) = self.mail.parsed(id) else {
+            return;
+        };
+        let draft = snail_core::compose::forward(&parsed);
+        crate::compose::open(self.mail.clone(), draft, cx);
+    }
+
     fn reading_pane(&self, palette: &snail_ui::theme::Theme, cx: &mut Context<Self>) -> AnyElement {
         let Some(reading) = &self.reading else {
             return Self::empty_state(palette, cx, EmptyState::EmptyMailbox);
@@ -822,6 +845,18 @@ impl Shell {
                                     settings::toggle_body_preference(cx);
                                     this.load_reading(window, cx);
                                     cx.notify();
+                                }),
+                            ))
+                            .child(action("Reply").on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _window, cx| {
+                                    this.compose_reply(false, cx);
+                                }),
+                            ))
+                            .child(action("Forward").on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _window, cx| {
+                                    this.compose_forward(cx);
                                 }),
                             ))
                             .when(is_html, |this| {
@@ -1032,6 +1067,10 @@ impl Render for Shell {
                         settings::toggle_body_preference(cx);
                         this.load_reading(window, cx);
                     }
+                    // Compose / reply / forward (E7).
+                    "c" => crate::compose::open(this.mail.clone(), Default::default(), cx),
+                    "r" => this.compose_reply(event.keystroke.modifiers.shift, cx),
+                    "f" => this.compose_forward(cx),
                     _ => return,
                 }
                 cx.notify();

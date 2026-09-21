@@ -14,6 +14,7 @@ use snail_services::auth::GoogleOAuth;
 use std::sync::Arc;
 
 mod dev_overlay;
+mod compose;
 mod frame_stats;
 mod html_view;
 mod icons;

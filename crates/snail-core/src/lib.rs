@@ -4,6 +4,7 @@
 //! HTML sanitize + DOM. No UI, no GPUI (plan.md §2).
 
 pub mod cache;
+pub mod compose;
 pub mod fixture;
 pub mod html;
 pub mod mime;

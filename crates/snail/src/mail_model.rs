@@ -50,6 +50,48 @@ impl MailModel {
         self.store.raw_bytes(id).ok().flatten()
     }
 
+    /// Parse a cached message for reply/forward derivation (E7.4).
+    pub fn parsed(&self, id: i64) -> Option<ParsedMessage> {
+        snail_core::mime::parse_raw(&self.raw(id)?).ok()
+    }
+
+    /// The first account's address, to exclude the user from a reply-all.
+    pub fn first_account_address(&self) -> Option<String> {
+        self.store
+            .accounts()
+            .ok()?
+            .first()
+            .map(|account| account.address.clone())
+    }
+
+    /// The first account, for a first-cut send (E7.11 will pick by identity).
+    pub fn first_account_id(&self) -> Option<i64> {
+        self.store.accounts().ok()?.first().map(|account| account.id)
+    }
+
+    /// Queue an outbound message (E7.10): the raw bytes go to the cache, and the `pending_op` holds
+    /// the hash so nothing large sits in SQLite. Blocked by default (after the undo window).
+    pub fn enqueue_send(&self, raw: &[u8]) -> Option<String> {
+        let account_id = self.first_account_id()?;
+        let hash = self.store.cache().put(raw).ok()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs() as i64)
+            .unwrap_or(0);
+        self.store
+            .enqueue_op(&snail_core::store::NewOp {
+                account_id,
+                target_kind: "message".into(),
+                target_id: None,
+                operation: "send".into(),
+                payload_json: Some(format!("{{\"raw_hash\":\"{hash}\"}}")),
+                idempotency_key: format!("send:{hash}"),
+                now,
+            })
+            .ok()?;
+        Some(hash)
+    }
+
     /// Fetch a remote image, served from the content-addressed cache when it has been seen (E6.8).
     /// Runs on whatever thread calls it — the shell calls it from the background executor.
     pub fn fetch_remote_image(&self, url: &str) -> Option<Vec<u8>> {

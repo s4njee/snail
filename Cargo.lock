@@ -4143,6 +4143,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mail-builder"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ccbc27cb02a58a311a404769a22f5abf63fe3173b290d80be7c534f9c7023151"
+dependencies = [
+ "gethostname",
+]
+
+[[package]]
 name = "mail-parser"
 version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6744,6 +6753,7 @@ dependencies = [
  "env_logger",
  "html5ever 0.27.0",
  "log",
+ "mail-builder",
  "mail-parser",
  "markup5ever_rcdom",
  "quoted_printable",
