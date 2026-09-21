@@ -6,3 +6,5 @@
 
 pub mod html;
 pub mod layout;
+pub mod text;
+pub mod theme;

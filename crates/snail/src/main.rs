@@ -1,5 +1,7 @@
 //! Snail's GPUI app: views, models, theme application, actions/keymap (plan.md §2).
 
+use std::borrow::Cow;
+
 use gpui_kit::component::{Root, TitleBar};
 use gpui_kit::*;
 
@@ -10,6 +12,7 @@ mod frame_stats;
 mod rss;
 mod shell;
 mod startup;
+mod style;
 
 fn main() {
     startup::begin();
@@ -30,6 +33,16 @@ fn main() {
             startup::mark("app_launched");
             gpui_kit::init(cx);
             startup::mark("gpui_init");
+
+            // Fonts must be registered before the window opens or the first frame falls back to the
+            // system face (plan.md E1.1). Self-hosted, bundled, no runtime fetch.
+            cx.text_system()
+                .add_fonts(bundled_fonts())
+                .expect("the bundled Instrument Sans / Newsreader / DM Mono load");
+            startup::mark("fonts");
+
+            style::install(snail_ui::theme::Mode::Light, cx);
+            startup::mark("component_theme");
 
             let bounds = Bounds::centered(None, size(px(1240.), px(820.)), cx);
             cx.open_window(
@@ -58,4 +71,19 @@ fn main() {
 
             cx.activate(true);
         });
+}
+
+/// The bundled faces (plan.md §1.3): Instrument Sans (UI), Newsreader (message and event bodies),
+/// DM Mono (times, dates, counts, labels). Self-hosted under the OFL; see `assets/fonts/LICENSES.md`.
+fn bundled_fonts() -> Vec<Cow<'static, [u8]>> {
+    vec![
+        Cow::Borrowed(include_bytes!("../assets/fonts/InstrumentSans-400.ttf")),
+        Cow::Borrowed(include_bytes!("../assets/fonts/InstrumentSans-500.ttf")),
+        Cow::Borrowed(include_bytes!("../assets/fonts/InstrumentSans-600.ttf")),
+        Cow::Borrowed(include_bytes!("../assets/fonts/InstrumentSans-700.ttf")),
+        Cow::Borrowed(include_bytes!("../assets/fonts/Newsreader-400.ttf")),
+        Cow::Borrowed(include_bytes!("../assets/fonts/Newsreader-500.ttf")),
+        Cow::Borrowed(include_bytes!("../assets/fonts/DMMono-Regular.ttf")),
+        Cow::Borrowed(include_bytes!("../assets/fonts/DMMono-Medium.ttf")),
+    ]
 }
