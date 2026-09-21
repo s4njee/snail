@@ -915,12 +915,14 @@ E0.3 spike's failure taxonomy. All of it lives in `snail-core` (parse/sanitize) 
 
 *First cut done (2026-09-21): the reading pane renders HTML messages through the E0.3 pipeline —
 ammonia sanitize keeping the supported `style` subset → html5ever → the `snail-ui` DOM → block/inline
-layout with real GPUI text metrics → painted fragments. It is the E0.3 prototype promoted into
+layout with real GPUI text metrics → painted fragments. **Inline `cid:` images are decoded from the
+cached raw MIME and painted as real images with their size reserved (6.8)**, and remote images stay
+blocked placeholders (6.2). It is the E0.3 prototype promoted into
 `crates/snail/src/html_view.rs`; the E6 crate-boundary decision (where parse/sanitize lives, since
 `snail-core` and `snail-ui` may not depend on each other) is still open, which is why the parsing
 sits in the bin for now. Remaining: `<style>`/class resolution (6.3/6.4), `colspan`/nested tables
-(6.6), `cid:` images (6.8), quoted-text folding (6.9), selection (6.10), and the corpus snapshot
-test (6.14).*
+(6.6), remote-image fetch once unblocked (6.8's other half), quoted-text folding (6.9), selection
+(6.10), and the corpus snapshot test (6.14).*
 
 - [ ] 6.1 — MIME → displayable document: walk the part tree, pick the best alternative
       (`text/plain` vs `text/html` per the settings toggle), resolve `multipart/related` `cid:`

@@ -26,6 +26,13 @@ futures = { workspace = true }
 ammonia = "4"
 html5ever = "0.27"
 markup5ever_rcdom = "0.3"
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "webp",
+    "bmp",
+] }
 
 [features]
 default = ["profiler"]

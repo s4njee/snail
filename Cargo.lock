@@ -6717,6 +6717,7 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
  "html5ever 0.27.0",
+ "image",
  "libc",
  "log",
  "markup5ever_rcdom",

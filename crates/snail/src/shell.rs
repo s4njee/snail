@@ -30,7 +30,7 @@ struct Reading {
 
 enum BodyKind {
     Plain(String),
-    Html(crate::html_view::HtmlView),
+    Html(crate::html_view::HtmlView, crate::html_view::Images),
 }
 
 pub struct Shell {
@@ -113,8 +113,13 @@ impl Shell {
         let parsed = self.mail.parsed(id)?;
         let body = match parsed.body {
             snail_core::mime::Body::Html(html) => {
+                let images = match self.mail.raw(id) {
+                    Some(raw) => crate::html_view::Images::from_message(&raw),
+                    None => crate::html_view::Images::default(),
+                };
                 // 640px is roughly the reading pane's content width at the default window size.
-                BodyKind::Html(crate::html_view::layout_html(&html, 640.0, window))
+                let view = crate::html_view::layout_html(&html, 640.0, window, &images);
+                BodyKind::Html(view, images)
             }
             _ => BodyKind::Plain(
                 parsed
@@ -516,7 +521,9 @@ impl Shell {
                     .px_6()
                     .py_5()
                     .child(match &reading.body {
-                        BodyKind::Html(view) => crate::html_view::paint(view),
+                        BodyKind::Html(view, images) => {
+                            crate::html_view::paint(view, images).into_any_element()
+                        }
                         BodyKind::Plain(text) => {
                             style::text(text.clone(), TextRole::BodySerif, cx).into_any_element()
                         }

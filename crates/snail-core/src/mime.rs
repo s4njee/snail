@@ -131,6 +131,46 @@ pub fn parse_raw(bytes: &[u8]) -> Result<ParsedMessage> {
     })
 }
 
+/// An inline image referenced by `cid:` (E6.8). The bytes come from the cached raw MIME.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InlineImage {
+    pub content_id: String,
+    pub content_type: Option<String>,
+    pub bytes: Vec<u8>,
+}
+
+/// Every part with a `Content-ID`, for resolving `cid:` references (E6.8). mail-parser classifies
+/// non-text parts as attachments, which is where inline images live.
+pub fn inline_images(raw: &[u8]) -> Vec<InlineImage> {
+    let Some(message) = MessageParser::default().parse(raw) else {
+        return Vec::new();
+    };
+    let mut images = Vec::new();
+    for part in message.attachments() {
+        let Some(content_id) = part.content_id() else {
+            continue;
+        };
+        let content_id = content_id
+            .trim()
+            .trim_start_matches('<')
+            .trim_end_matches('>')
+            .trim_start_matches("cid:")
+            .to_string();
+        if content_id.is_empty() {
+            continue;
+        }
+        let content_type = part
+            .content_type()
+            .map(|ct| format!("{}/{}", ct.ctype(), ct.subtype().unwrap_or("")));
+        images.push(InlineImage {
+            content_id,
+            content_type,
+            bytes: part.contents().to_vec(),
+        });
+    }
+    images
+}
+
 fn header_text(value: &mail_parser::HeaderValue<'_>) -> Option<String> {
     use mail_parser::HeaderValue;
     let text = match value {
@@ -221,6 +261,20 @@ Content-Type: multipart/alternative; boundary=BB\r\n\r\n\
     fn a_plain_only_message_stays_plain() {
         let parsed = parse_raw(PLAIN).unwrap();
         assert!(matches!(parsed.body, Body::Text(_)), "plain must not be converted to html");
+    }
+
+    #[test]
+    fn inline_images_are_extracted_by_content_id() {
+        let raw = b"From: a@b.c\r\nSubject: pic\r\nMIME-Version: 1.0\r\n\
+Content-Type: multipart/related; boundary=BB\r\n\r\n\
+--BB\r\nContent-Type: text/html\r\n\r\n<img src=\"cid:logo1\">\r\n\
+--BB\r\nContent-Type: image/png; name=\"logo.png\"\r\nContent-ID: <logo1>\r\n\
+Content-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n--BB--\r\n";
+        let images = inline_images(raw);
+        assert_eq!(images.len(), 1, "one cid part");
+        assert_eq!(images[0].content_id, "logo1");
+        assert_eq!(images[0].content_type.as_deref(), Some("image/png"));
+        assert!(!images[0].bytes.is_empty());
     }
 
     #[test]

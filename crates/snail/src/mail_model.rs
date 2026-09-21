@@ -39,4 +39,9 @@ impl MailModel {
         let raw = self.store.raw_bytes(id).ok().flatten()?;
         snail_core::mime::parse_raw(&raw).ok()
     }
+
+    /// The cached raw MIME bytes, for resolving inline `cid:` images (E6.8).
+    pub fn raw(&self, id: i64) -> Option<Vec<u8>> {
+        self.store.raw_bytes(id).ok().flatten()
+    }
 }
