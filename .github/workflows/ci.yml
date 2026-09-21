@@ -72,9 +72,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libvulkan1 libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev \
-            libfontconfig1-dev libasound2-dev libssl-dev \
-            pkg-config clang libclang-dev
+            libvulkan1 vulkan-tools \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libx11-dev libx11-xcb-dev libxcb1-dev \
+            libxcb-randr0-dev libxcb-shm0-dev libxcb-xfixes0-dev libxcb-xkb-dev \
+            libxcb-composite0-dev libxcb-damage0-dev libxcb-present-dev \
+            libxrandr-dev libxi-dev libxcursor-dev libxext-dev \
+            libfontconfig1-dev libfreetype6-dev \
+            libasound2-dev libssl-dev libsqlite3-dev libzstd-dev \
+            pkg-config cmake clang libclang-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

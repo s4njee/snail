@@ -60,22 +60,28 @@ pub fn summary() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// The timeline is process-global and tests run in parallel, so serialize the ones that assert
+    /// on it and compare positions rather than absolute indices.
+    static LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn marks_are_recorded_in_order_and_monotonic() {
+        let _guard = LOCK.lock().unwrap();
         begin();
         mark("gpui_init");
         mark("shell_built");
         let marks = snapshot();
-        assert!(marks.len() >= 2);
-        assert_eq!(marks[0].0, "gpui_init");
-        assert_eq!(marks[1].0, "shell_built");
-        assert!(marks[1].1 >= marks[0].1);
+        let first = marks.iter().rposition(|(name, _)| *name == "gpui_init").unwrap();
+        let second = marks.iter().rposition(|(name, _)| *name == "shell_built").unwrap();
+        assert!(first < second, "gpui_init should precede shell_built");
+        assert!(marks[second].1 >= marks[first].1);
     }
 
     #[test]
     fn summary_renders_every_mark() {
-        begin();
+        let _guard = LOCK.lock().unwrap();
         mark("first_frame");
         let summary = summary();
         assert!(summary.contains("first_frame="), "{summary}");
