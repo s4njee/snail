@@ -9,6 +9,45 @@ use gpui_kit::*;
 use snail_ui::text::{self, Family, TextColor, TextRole};
 use snail_ui::theme::{self, Color, Mode};
 
+/// The user's theme choice (plan.md E1.12). `System` follows the OS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemePref {
+    System,
+    Light,
+    Dark,
+}
+
+impl Default for ThemePref {
+    fn default() -> Self {
+        Self::System
+    }
+}
+
+/// Apply a preference live: re-map the palette and gpui-kit `Theme`, pin the native chrome, and
+/// refresh every window. No relaunch (E1.12).
+pub fn apply(pref: ThemePref, cx: &mut App) {
+    let mode = match pref {
+        ThemePref::Light => Mode::Light,
+        ThemePref::Dark => Mode::Dark,
+        ThemePref::System => {
+            // Clear any override first so the OS answer is actually the OS answer.
+            cx.set_window_appearance(None);
+            match cx.window_appearance() {
+                WindowAppearance::Dark | WindowAppearance::VibrantDark => Mode::Dark,
+                _ => Mode::Light,
+            }
+        }
+    };
+    install(mode, cx);
+    cx.set_window_appearance(match pref {
+        ThemePref::System => None,
+        ThemePref::Light => Some(WindowAppearance::Light),
+        ThemePref::Dark => Some(WindowAppearance::Dark),
+    });
+    cx.refresh_windows();
+}
+
 /// The active Snail palette, as a GPUI global, so `text` and `palette` need no plumbing.
 struct ActivePalette(&'static theme::Theme);
 
@@ -46,7 +85,8 @@ pub fn color_u32(color: Color) -> u32 {
     (color[0] as u32) << 24 | (color[1] as u32) << 16 | (color[2] as u32) << 8 | color[3] as u32
 }
 
-/// The only way a view produces text (plan.md E1.4).
+/// The only way a view produces text (plan.md E1.4). Roles with letter-spacing render through the
+/// tracked element (E1.5); everything else is one text run.
 pub fn text(content: impl Into<SharedString>, role: TextRole, cx: &App) -> Div {
     let palette = palette(cx);
     let spec = text::spec(role);
@@ -56,13 +96,31 @@ pub fn text(content: impl Into<SharedString>, role: TextRole, cx: &App) -> Div {
     } else {
         raw
     };
-    div()
+    let style = div()
         .font_family(family(spec.family))
         .text_size(px(spec.size))
         .font_weight(weight(spec.weight))
         .line_height(px(spec.size * spec.line_height))
-        .text_color(color(color_for(&palette.colors, spec.color)))
-        .child(content)
+        .text_color(color(color_for(&palette.colors, spec.color)));
+    if spec.tracking_em != 0.0 {
+        style.child(crate::tracked::tracked(
+            content,
+            font(&spec),
+            px(spec.size),
+            px(spec.size * spec.line_height),
+            px(spec.size * spec.tracking_em),
+        ))
+    } else {
+        style.child(content)
+    }
+}
+
+fn font(spec: &text::TextSpec) -> Font {
+    Font {
+        family: family(spec.family),
+        weight: weight(spec.weight),
+        ..Default::default()
+    }
 }
 
 fn family(family: Family) -> SharedString {

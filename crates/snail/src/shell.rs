@@ -7,11 +7,15 @@ use gpui_kit::*;
 use snail_ui::text::TextRole;
 
 use crate::dev_overlay::DevOverlay;
-use crate::style;
+use crate::icons::{icon, Icon};
+use crate::settings;
+use crate::style::{self, ThemePref};
 
 pub struct Shell {
     focus: FocusHandle,
     overlay: DevOverlay,
+    /// Kept, not dropped: a dropped subscription cancels the OS appearance feed (E1.12).
+    _appearance: Subscription,
 }
 
 impl Shell {
@@ -19,29 +23,95 @@ impl Shell {
         let focus = cx.focus_handle();
         // The shell takes focus at launch, or single-letter shortcuts dispatch above it (E15.5).
         window.focus(&focus, cx);
+        // While set to System, follow the OS flipping light/dark under us (E1.12).
+        let appearance = cx.observe_window_appearance(window, |_this, _window, cx| {
+            if settings::pref(cx) == ThemePref::System {
+                style::apply(ThemePref::System, cx);
+                cx.notify();
+            }
+        });
         Self {
             focus,
             overlay: DevOverlay::new(),
+            _appearance: appearance,
         }
     }
 
-    fn titlebar(palette: &snail_ui::theme::Theme, cx: &App) -> impl IntoElement {
+    fn titlebar(palette: &snail_ui::theme::Theme, _window: &mut Window, cx: &App) -> impl IntoElement {
         div()
             .h(px(palette.metrics.titlebar_h))
             .flex_none()
             .flex()
             .items_center()
-            .gap_3()
+            .justify_between()
             .px_4()
             .bg(style::color(palette.colors.chrome))
             .border_b_1()
             .border_color(style::color(palette.colors.border_hairline))
-            .child(style::text("Snail", TextRole::ListHeaderTitle, cx))
-            .child(style::text("E1 · design system", TextRole::SectionLabel, cx))
+            // The 52px bar is the OS drag region (E1.2).
+            .window_control_area(WindowControlArea::Drag)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    // macOS draws real traffic lights at (14, 20); leave them room.
+                    .when(cfg!(target_os = "macos"), |this| this.pl(px(78.0)))
+                    .child(style::text("Snail", TextRole::ListHeaderTitle, cx))
+                    .child(style::text("E1 · design system", TextRole::SectionLabel, cx)),
+            )
+            .child(Self::window_controls(palette, cx))
+    }
+
+    /// macOS uses the system traffic lights; Windows and Linux get drawn controls (E1.2/E18.5).
+    fn window_controls(palette: &snail_ui::theme::Theme, cx: &App) -> AnyElement {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (palette, cx);
+            div().into_any_element()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let height = palette.metrics.titlebar_h;
+            let button = move |glyph: &'static str, area: WindowControlArea| {
+                div()
+                    .window_control_area(area)
+                    .w(px(34.0))
+                    .h(px(height))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(style::color(palette.colors.secondary))
+                    .hover(|this| this.bg(style::color(palette.colors.sunken)))
+                    .child(glyph)
+            };
+            let _ = cx;
+            div()
+                .flex()
+                .child(
+                    button("–", WindowControlArea::Min)
+                        .on_click(|_, window, _| window.minimize_window()),
+                )
+                .child(
+                    button("□", WindowControlArea::Max)
+                        .on_click(|_, window, _| window.zoom_window()),
+                )
+                .child(
+                    button("×", WindowControlArea::Close)
+                        .on_click(|_, window, _| window.remove_window()),
+                )
+                .into_any_element()
+        }
     }
 
     fn sidebar(palette: &snail_ui::theme::Theme, cx: &App) -> impl IntoElement {
-        let items = ["Inbox", "Sent", "Drafts", "Archive", "Trash"];
+        let items = [
+            ("Inbox", Icon::Inbox),
+            ("Sent", Icon::Send),
+            ("Drafts", Icon::Document),
+            ("Archive", Icon::Archive),
+            ("Trash", Icon::Trash),
+        ];
         div()
             .flex_none()
             .w(px(palette.metrics.sidebar_w))
@@ -60,20 +130,30 @@ impl Shell {
                     .pb_2()
                     .child(style::text("Mailboxes", TextRole::SectionLabel, cx)),
             )
-            .children(items.into_iter().enumerate().map(|(index, name)| {
+            .children(items.into_iter().enumerate().map(|(index, (name, glyph))| {
                 let selected = index == 0;
                 let role = if selected {
                     TextRole::SidebarItemSelected
                 } else {
                     TextRole::SidebarItem
                 };
+                let icon_color = if selected {
+                    palette.colors.accent
+                } else {
+                    palette.colors.muted
+                };
                 div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
                     .px_2()
                     .py_1()
                     .rounded(px(palette.radii.button))
                     .when(selected, |this| {
                         this.bg(style::color(palette.colors.accent_tint_deep))
                     })
+                    .child(icon(glyph).text_color(style::color(icon_color)))
                     .child(style::text(name, role, cx))
             }))
     }
@@ -157,12 +237,22 @@ impl Render for Shell {
             .text_color(style::color(palette.colors.ink))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                if event.keystroke.key == "f2" {
-                    this.overlay.toggle();
-                    cx.notify();
+                match event.keystroke.key.as_str() {
+                    // F2 toggles the dev overlay; F3 cycles System → Light → Dark (E1.12).
+                    "f2" => this.overlay.toggle(),
+                    "f3" => {
+                        let next = match settings::pref(cx) {
+                            ThemePref::System => ThemePref::Light,
+                            ThemePref::Light => ThemePref::Dark,
+                            ThemePref::Dark => ThemePref::System,
+                        };
+                        settings::set(next, cx);
+                    }
+                    _ => return,
                 }
+                cx.notify();
             }))
-            .child(Self::titlebar(palette, cx))
+            .child(Self::titlebar(palette, window, cx))
             .child(
                 div()
                     .flex()

@@ -2,17 +2,20 @@
 
 use std::borrow::Cow;
 
-use gpui_kit::component::{Root, TitleBar};
+use gpui_kit::component::Root;
 use gpui_kit::*;
 
 use snail_core::paths::Paths;
 
 mod dev_overlay;
 mod frame_stats;
+mod icons;
 mod rss;
+mod settings;
 mod shell;
 mod startup;
 mod style;
+mod tracked;
 
 fn main() {
     startup::begin();
@@ -25,11 +28,14 @@ fn main() {
     log::info!("snail starting; config={:?} cache={:?}", paths.config, paths.cache);
     startup::mark("paths_and_logging");
 
+    let theme_pref = settings::load(&paths);
+    let theme_file = paths.settings_file("theme");
+
     // Without the asset source every gpui-kit icon, including the Windows/Linux window controls,
     // silently paints nothing (plan.md §1.2, E1.1).
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
-        .run(|cx| {
+        .run(move |cx| {
             startup::mark("app_launched");
             gpui_kit::init(cx);
             startup::mark("gpui_init");
@@ -41,9 +47,8 @@ fn main() {
                 .expect("the bundled Instrument Sans / Newsreader / DM Mono load");
             startup::mark("fonts");
 
-            style::install(snail_ui::theme::Mode::Light, cx);
+            settings::install(theme_file.clone(), theme_pref, cx);
             startup::mark("component_theme");
-
             let bounds = Bounds::centered(None, size(px(1240.), px(820.)), cx);
             cx.open_window(
                 WindowOptions {
@@ -52,7 +57,16 @@ fn main() {
                     // Otherwise labwc and other compositors draw their own title bar over ours
                     // (plan.md §1.2, E1.2).
                     window_decorations: Some(WindowDecorations::Client),
-                    ..TitleBar::window_options()
+                    // macOS draws the real traffic lights over a transparent 52px titlebar; the
+                    // shell owns dragging (E1.2). Windows/Linux draw their own controls.
+                    titlebar: Some(TitlebarOptions {
+                        title: None,
+                        appears_transparent: true,
+                        traffic_light_position: Some(point(px(14.0), px(20.0))),
+                        ..Default::default()
+                    }),
+                    app_owns_titlebar_drag: true,
+                    ..Default::default()
                 },
                 |window, cx| {
                     startup::mark("window_opened");
