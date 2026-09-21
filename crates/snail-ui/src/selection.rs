@@ -166,7 +166,9 @@ mod tests {
         selection.select(20);
         selection.extend_by(2, &ids());
         assert_eq!(selection.cursor(), Some(40));
-        assert!(selection.is_selected(20) && selection.is_selected(30) && selection.is_selected(40));
+        assert!(
+            selection.is_selected(20) && selection.is_selected(30) && selection.is_selected(40)
+        );
         assert!(!selection.is_selected(10));
     }
 
@@ -186,7 +188,11 @@ mod tests {
         selection.select_in(&ids(), 30);
         // A sync delivered three newer rows above.
         selection.reconcile(&[1, 2, 3, 10, 20, 30, 40, 50]);
-        assert_eq!(selection.cursor(), Some(30), "the cursor must not jump to a new message");
+        assert_eq!(
+            selection.cursor(),
+            Some(30),
+            "the cursor must not jump to a new message"
+        );
     }
 
     #[test]

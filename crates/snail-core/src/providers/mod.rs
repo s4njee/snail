@@ -1,7 +1,9 @@
 //! The provider boundary (plan.md E4.1). Gmail-over-REST and iCloud-over-IMAP produce the same
 //! rows; **no view ever branches on the account kind** except to draw its name and colour dot.
 
+pub mod caldav;
 pub mod gmail;
+pub mod google_calendar;
 pub mod imap;
 
 use anyhow::Result;

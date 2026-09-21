@@ -69,7 +69,11 @@ pub fn build_raw(draft: &Draft) -> Result<Vec<u8>> {
         .subject(draft.subject.clone())
         .text_body(draft.body_text.clone());
 
-    if let Some(html) = draft.body_html.as_deref().filter(|html| !html.trim().is_empty()) {
+    if let Some(html) = draft
+        .body_html
+        .as_deref()
+        .filter(|html| !html.trim().is_empty())
+    {
         builder = builder.html_body(html.to_string());
     }
     if !draft.cc.is_empty() {
@@ -116,7 +120,9 @@ pub fn reply(original: &ParsedMessage, self_addr: Option<&str>, all: bool) -> Dr
     if all {
         let reply_to = original.from_addr.as_deref();
         for recipient in &original.to {
-            if Some(recipient.address.as_str()) == self_addr || Some(recipient.address.as_str()) == reply_to {
+            if Some(recipient.address.as_str()) == self_addr
+                || Some(recipient.address.as_str()) == reply_to
+            {
                 continue;
             }
             draft.cc.push(recipient.clone());
@@ -134,7 +140,11 @@ pub fn forward(original: &ParsedMessage) -> Draft {
         body.push_str(&format!(
             "From: {}{}\n",
             original.from_name.clone().unwrap_or_default(),
-            if original.from_name.is_some() { format!(" <{from}>") } else { from.clone() }
+            if original.from_name.is_some() {
+                format!(" <{from}>")
+            } else {
+                from.clone()
+            }
         ));
     }
     body.push_str(&format!(
@@ -278,14 +288,20 @@ mod tests {
         let draft = reply(&original(), Some("me@example.com"), true);
         let addresses: Vec<&str> = draft.cc.iter().map(|r| r.address.as_str()).collect();
         assert!(!addresses.contains(&"me@example.com"), "not to self");
-        assert!(!addresses.contains(&"maya@example.com"), "not to the sender again");
+        assert!(
+            !addresses.contains(&"maya@example.com"),
+            "not to the sender again"
+        );
         assert!(addresses.contains(&"other@example.com"));
     }
 
     #[test]
     fn attachments_and_html_round_trip() {
         let mut draft = Draft {
-            to: vec![Recipient { name: None, address: "a@b.c".into() }],
+            to: vec![Recipient {
+                name: None,
+                address: "a@b.c".into(),
+            }],
             from_addr: Some("me@example.com".into()),
             subject: "files".into(),
             body_text: "see attached".into(),
@@ -300,9 +316,15 @@ mod tests {
         draft.from_name = Some("Me".into());
         let raw = build_raw(&draft).unwrap();
         let parsed = crate::mime::parse_raw(&raw).unwrap();
-        assert!(matches!(parsed.body, Body::Html(_)), "html alternative wins for display");
+        assert!(
+            matches!(parsed.body, Body::Html(_)),
+            "html alternative wins for display"
+        );
         assert_eq!(parsed.attachments.len(), 1);
-        assert_eq!(parsed.attachments[0].filename.as_deref(), Some("report.pdf"));
+        assert_eq!(
+            parsed.attachments[0].filename.as_deref(),
+            Some("report.pdf")
+        );
     }
 
     #[test]
@@ -343,7 +365,13 @@ mod tests {
         let parsed = crate::mime::parse_raw(&raw).unwrap();
         assert_eq!(parsed.subject.as_deref(), Some("Re: Almanac geometry"));
         assert_eq!(parsed.in_reply_to.as_deref(), Some("m2@example.com"));
-        assert!(parsed.references.as_deref().unwrap().contains("m2@example.com"));
+        assert!(
+            parsed
+                .references
+                .as_deref()
+                .unwrap()
+                .contains("m2@example.com")
+        );
         assert_eq!(parsed.to[0].address, "maya@example.com");
         assert!(matches!(parsed.body, Body::Text(_)));
     }

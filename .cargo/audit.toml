@@ -1,0 +1,8 @@
+[advisories]
+ignore = [
+    # Accepted only while pgp 0.20.0's rsa dependency has no compatible patched release. See
+    # deny.toml and docs/PGP_SECURITY_WATCH.md; reassess on every pgp upgrade.
+    "RUSTSEC-2023-0071",
+    # Transitive unmaintained rustls-pemfile edge; not exercised by Snail's PGP path.
+    "RUSTSEC-2025-0144",
+]

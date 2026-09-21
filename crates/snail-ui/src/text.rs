@@ -88,8 +88,12 @@ pub enum TextRole {
     SettingsRowHelper,
 
     // Calendar.
+    CalendarMonthTitle,
     CalendarTitle,
+    CalendarButtonLabelFilled,
     MonthDayNumeral,
+    MonthDayOutside,
+    MonthDayToday,
     AgendaDate,
     EventTitle,
     EventNotes,
@@ -133,8 +137,12 @@ pub const ALL_ROLES: &[TextRole] = &[
     TextRole::Signature,
     TextRole::SettingsRowTitle,
     TextRole::SettingsRowHelper,
+    TextRole::CalendarMonthTitle,
     TextRole::CalendarTitle,
+    TextRole::CalendarButtonLabelFilled,
     TextRole::MonthDayNumeral,
+    TextRole::MonthDayOutside,
+    TextRole::MonthDayToday,
     TextRole::AgendaDate,
     TextRole::EventTitle,
     TextRole::EventNotes,
@@ -212,9 +220,9 @@ pub fn spec(role: TextRole) -> TextSpec {
         TextRole::HourGutter => mono(10.0, 500, 0.04, Faint),
         TextRole::WeekdayLabel => TextSpec {
             uppercase: true,
-            ..mono(10.0, 600, 0.12, Faint)
+            ..mono(10.0, 400, 0.12, Faint)
         },
-        TextRole::CalendarYear => mono(13.0, 500, 0.04, Muted),
+        TextRole::CalendarYear => mono(13.0, 400, 0.04, Muted),
         TextRole::EventTime => mono(11.0, 400, 0.0, Muted),
         TextRole::Kbd => mono(11.0, 500, 0.02, Muted),
 
@@ -257,19 +265,32 @@ pub fn spec(role: TextRole) -> TextSpec {
         TextRole::SettingsRowTitle => ui(13.0, 500, Ink),
         TextRole::SettingsRowHelper => ui(11.5, 400, Soft),
 
-        TextRole::CalendarTitle => TextSpec {
+        TextRole::CalendarMonthTitle => TextSpec {
             tracking_em: -0.03,
             ..ui(42.0, 600, Ink)
         },
+        TextRole::CalendarTitle => TextSpec {
+            tracking_em: -0.025,
+            ..ui(34.0, 400, Ink)
+        },
+        TextRole::CalendarButtonLabelFilled => ui(12.0, 500, Inverted),
         TextRole::MonthDayNumeral => TextSpec {
-            tracking_em: -0.045,
-            ..ui(76.0, 400, Secondary)
+            tracking_em: -0.02,
+            ..ui(14.0, 400, Secondary)
+        },
+        TextRole::MonthDayOutside => TextSpec {
+            tracking_em: -0.02,
+            ..ui(14.0, 400, Muted)
+        },
+        TextRole::MonthDayToday => TextSpec {
+            tracking_em: -0.02,
+            ..ui(14.0, 500, Inverted)
         },
         TextRole::AgendaDate => TextSpec {
             tracking_em: -0.045,
             ..ui(46.0, 400, Ink)
         },
-        TextRole::EventTitle => ui(13.0, 600, Ink),
+        TextRole::EventTitle => ui(13.0, 400, Ink),
         TextRole::EventNotes => serif(15.0, 1.7, BodyInk),
 
         TextRole::BodySerif => serif(15.0, 1.7, BodyInk),
@@ -305,7 +326,10 @@ mod tests {
             assert!(spec.size >= 10.0 && spec.size <= 80.0, "{role:?} size");
             assert!(spec.line_height >= 1.0, "{role:?} line height");
             assert!(spec.tracking_em.abs() < 0.2, "{role:?} tracking");
-            assert!(matches!(spec.weight, 400 | 500 | 600 | 700), "{role:?} weight");
+            assert!(
+                matches!(spec.weight, 400 | 500 | 600 | 700),
+                "{role:?} weight"
+            );
         }
     }
 
@@ -315,7 +339,7 @@ mod tests {
         assert_eq!(unique.len(), ALL_ROLES.len(), "duplicate in ALL_ROLES");
         // Every variant that `spec` handles must be in the list: this count is the guard that a
         // newly added role is also added to ALL_ROLES.
-        assert_eq!(ALL_ROLES.len(), 39);
+        assert_eq!(ALL_ROLES.len(), 43);
     }
 
     #[test]

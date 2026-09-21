@@ -5,10 +5,17 @@
 //! First cut: these reads are local and fast, so they run inline. E5.12 moves them onto the
 //! background executor with a generation guard (§2).
 
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use snail_core::mime::{BodyPreference, ParsedMessage};
+use snail_core::pgp::{KeyRing, KeySummary, VerificationState};
+use snail_core::pgp_mime::CryptoEnvelope;
 use snail_core::store::Store;
+use snail_services::pgp::PassphraseManager;
+use snail_services::pgp::{DiscoveryResult, WkdClient};
+use snail_services::secrets::KeyringStore;
 
 // The shell sees these through the model, so it never names the store.
 pub use snail_core::store::{MailboxRow, MessageRow, SearchHit};
@@ -16,14 +23,227 @@ pub use snail_core::store::{MailboxRow, MessageRow, SearchHit};
 #[derive(Clone)]
 pub struct MailModel {
     store: Arc<Store>,
+    pgp: Arc<Mutex<KeyRing>>,
+    pgp_passphrases: Arc<PassphraseManager>,
+}
+
+pub struct CryptoReading {
+    pub state: VerificationState,
+    /// Decrypted RFC822/MIME entity. This value exists in task/UI memory only and never reaches
+    /// `Store`, `Cache`, draft autosave, or FTS.
+    pub plaintext: Option<Vec<u8>>,
 }
 
 impl MailModel {
     pub fn new(store: Arc<Store>) -> Self {
-        Self { store }
+        Self {
+            store,
+            pgp: Arc::new(Mutex::new(KeyRing::new())),
+            pgp_passphrases: Arc::new(PassphraseManager::with_keychain(Arc::new(
+                KeyringStore::new(),
+            ))),
+        }
+    }
+
+    pub fn import_pgp_key(&self, path: &Path) -> anyhow::Result<KeySummary> {
+        self.pgp.lock().unwrap().import_file(path)
+    }
+
+    /// WKD is a discovery convention, not a trust signal. The client applies the draft's DNS-only
+    /// fallback rule and this import still validates the certificate binding chain.
+    pub fn discover_pgp_key(&self, email: &str) -> anyhow::Result<Option<KeySummary>> {
+        match WkdClient::system()?.lookup(email)? {
+            DiscoveryResult::Found(bytes) => self
+                .pgp
+                .lock()
+                .unwrap()
+                .import_bytes(format!("wkd-{email}.pgp").into(), &bytes)
+                .map(Some),
+            DiscoveryResult::NotFound => Ok(None),
+        }
+    }
+
+    pub fn pgp_keys(&self) -> Vec<KeySummary> {
+        self.pgp.lock().unwrap().list()
+    }
+
+    pub fn signature_for(&self, address: Option<&str>) -> Option<String> {
+        let address = address?.trim();
+        if address.is_empty() {
+            return None;
+        }
+        for account in self.store.accounts().unwrap_or_default() {
+            for identity in self.store.identities(account.id).unwrap_or_default() {
+                if identity.address.eq_ignore_ascii_case(address)
+                    && let Some(signature) = identity.signature
+                    && !signature.trim().is_empty()
+                {
+                    return Some(signature);
+                }
+            }
+        }
+        None
+    }
+
+    pub fn missing_pgp_encryption_keys(&self, recipients: &[String]) -> Vec<String> {
+        self.pgp
+            .lock()
+            .unwrap()
+            .missing_encryption_keys(recipients.iter().map(String::as_str), SystemTime::now())
+    }
+
+    /// Apply RFC 3156 signing and/or encryption. This is CPU work and must be called from a
+    /// background executor. Missing recipient keys are checked before any message is queued.
+    pub fn protect_outbound(
+        &self,
+        raw: &[u8],
+        recipients: &[String],
+        sign: bool,
+        encrypt: bool,
+    ) -> anyhow::Result<Vec<u8>> {
+        if !sign && !encrypt {
+            return Ok(raw.to_vec());
+        }
+        let (outer, mut entity) = snail_core::pgp_mime::split_rfc822(raw)?;
+        let ring = self.pgp.lock().unwrap();
+        if sign {
+            let secret = ring
+                .list()
+                .into_iter()
+                .find(|key| key.secret)
+                .ok_or_else(|| anyhow::anyhow!("no secret OpenPGP key is imported"))?;
+            let passphrase = self
+                .pgp_passphrases
+                .resolve(&secret.fingerprint)?
+                .unwrap_or_default();
+            let signature = ring.sign_detached(&entity, &secret.fingerprint, &passphrase)?;
+            let boundary = format!("snail-signed-{:016x}", rand::random::<u64>());
+            entity = snail_core::pgp_mime::multipart_signed(&entity, &signature, &boundary)?;
+        }
+        if encrypt {
+            let missing = ring
+                .missing_encryption_keys(recipients.iter().map(String::as_str), SystemTime::now());
+            if !missing.is_empty() {
+                anyhow::bail!("key missing for {}", missing.join(", "));
+            }
+            let encrypted = ring.encrypt_for(
+                &entity,
+                recipients.iter().map(String::as_str),
+                SystemTime::now(),
+            )?;
+            let boundary = format!("snail-encrypted-{:016x}", rand::random::<u64>());
+            entity = snail_core::pgp_mime::multipart_encrypted(&encrypted, &boundary)?;
+        }
+        Ok(snail_core::pgp_mime::join_rfc822(outer, &entity))
+    }
+
+    pub fn unlock_pgp_key(
+        &self,
+        fingerprint: &str,
+        passphrase: String,
+        remember: bool,
+    ) -> anyhow::Result<()> {
+        self.pgp_passphrases
+            .unlock(fingerprint, passphrase, remember)
+    }
+
+    /// Analyze one raw message. Callers must use a background executor; intentionally no store
+    /// write is performed even when decryption succeeds.
+    pub fn analyze_pgp(&self, raw: &[u8]) -> CryptoReading {
+        // Attached certificates are discovery candidates. `import_bytes` checks the complete
+        // binding chain before they can enter the local keyring.
+        for (index, attached) in snail_core::pgp_mime::attached_public_keys(raw)
+            .into_iter()
+            .enumerate()
+        {
+            let source = format!("attached-mail-key-{index}.asc").into();
+            if let Err(error) = self.pgp.lock().unwrap().import_bytes(source, &attached) {
+                log::warn!("ignored invalid attached OpenPGP key: {error:#}");
+            }
+        }
+
+        let now = SystemTime::now();
+        match snail_core::pgp_mime::envelope(raw) {
+            CryptoEnvelope::None => CryptoReading {
+                state: VerificationState::NotSigned,
+                plaintext: None,
+            },
+            CryptoEnvelope::DetachedSigned { entity, signature } => CryptoReading {
+                state: self.pgp.lock().unwrap().verify_detached(
+                    &snail_core::pgp_mime::canonicalize_signed_entity(&entity),
+                    &signature,
+                    now,
+                ),
+                plaintext: None,
+            },
+            CryptoEnvelope::InlineSigned(armored) => CryptoReading {
+                state: self.pgp.lock().unwrap().verify_inline(&armored, now),
+                plaintext: None,
+            },
+            CryptoEnvelope::Encrypted(ciphertext) | CryptoEnvelope::InlineEncrypted(ciphertext) => {
+                self.decrypt_pgp_payload(&ciphertext)
+            }
+        }
+    }
+
+    fn decrypt_pgp_payload(&self, ciphertext: &[u8]) -> CryptoReading {
+        let summaries = self.pgp.lock().unwrap().list();
+        if !summaries.iter().any(|key| key.secret) {
+            return CryptoReading {
+                state: VerificationState::Encrypted {
+                    decrypted: false,
+                    detail: "Encrypted · import the matching secret key".into(),
+                },
+                plaintext: None,
+            };
+        }
+
+        // Unprotected secret keys work without a prompt. Protected keys use the per-session cache
+        // or, when opted into previously, the OS keychain.
+        if let Ok(plaintext) = self.pgp.lock().unwrap().decrypt(ciphertext, "") {
+            return CryptoReading {
+                state: VerificationState::Encrypted {
+                    decrypted: true,
+                    detail: "Encrypted · decrypted in memory".into(),
+                },
+                plaintext: Some(plaintext.as_bytes().to_vec()),
+            };
+        }
+        let mut needs_prompt = false;
+        for key in summaries.iter().filter(|key| key.secret) {
+            match self.pgp_passphrases.resolve(&key.fingerprint) {
+                Ok(Some(passphrase)) => {
+                    if let Ok(plaintext) = self.pgp.lock().unwrap().decrypt(ciphertext, &passphrase)
+                    {
+                        return CryptoReading {
+                            state: VerificationState::Encrypted {
+                                decrypted: true,
+                                detail: "Encrypted · decrypted in memory".into(),
+                            },
+                            plaintext: Some(plaintext.as_bytes().to_vec()),
+                        };
+                    }
+                }
+                Ok(None) => needs_prompt = true,
+                Err(error) => log::warn!("could not read PGP passphrase from keychain: {error:#}"),
+            }
+        }
+        CryptoReading {
+            state: if needs_prompt {
+                VerificationState::Encrypted {
+                    decrypted: false,
+                    detail: "Encrypted · passphrase required".into(),
+                }
+            } else {
+                VerificationState::DecryptionFailed {
+                    detail: "Could not decrypt this message".into(),
+                }
+            },
+            plaintext: None,
+        }
     }
     pub fn mailboxes(&self) -> Vec<MailboxRow> {
-        self.store.mailboxes().unwrap_or_default()
+        self.store.enabled_mailboxes().unwrap_or_default()
     }
 
     pub fn page(&self, mailbox_id: i64, limit: u32) -> Vec<MessageRow> {
@@ -84,6 +304,19 @@ impl MailModel {
         self.store.rollback_failed_triage(now_epoch()).unwrap_or(0)
     }
 
+    /// Fix previews stored with CSS in them (once per store). Run off the main thread.
+    pub fn repair_previews(&self) -> usize {
+        self.store.repair_html_previews().unwrap_or_else(|error| {
+            log::warn!("preview repair failed: {error:#}");
+            0
+        })
+    }
+
+    /// The mailbox a message is filed in, to open it from a notification.
+    pub fn mailbox_of(&self, message_id: i64) -> Option<i64> {
+        self.store.message_mailbox(message_id).ok().flatten()
+    }
+
     pub fn thread_id_of(&self, message_id: i64) -> Option<i64> {
         self.store.thread_id_of(message_id).ok().flatten()
     }
@@ -94,7 +327,9 @@ impl MailModel {
 
     /// One row per thread, for the "group by thread" list (E8.3).
     pub fn thread_page(&self, mailbox_id: i64, limit: u32) -> Vec<snail_core::store::ThreadRow> {
-        self.store.thread_page(mailbox_id, limit).unwrap_or_default()
+        self.store
+            .thread_page(mailbox_id, limit)
+            .unwrap_or_default()
     }
 
     /// Address autocomplete from the harvested contacts (E7.3).
@@ -155,7 +390,11 @@ impl MailModel {
 
     /// The first account, for a first-cut send (E7.11 will pick by identity).
     pub fn first_account_id(&self) -> Option<i64> {
-        self.store.accounts().ok()?.first().map(|account| account.id)
+        self.store
+            .accounts()
+            .ok()?
+            .first()
+            .map(|account| account.id)
     }
 
     /// Autosave a draft (E7.6): the raw message goes to the cache, the row to the Drafts mailbox.
@@ -172,7 +411,15 @@ impl MailModel {
         let raw_hash = self.store.cache().put(raw).ok();
         let now = now_epoch();
         self.store
-            .save_draft(draft_id, account_id, subject, body_text, to_json, raw_hash.as_deref(), now)
+            .save_draft(
+                draft_id,
+                account_id,
+                subject,
+                body_text,
+                to_json,
+                raw_hash.as_deref(),
+                now,
+            )
             .ok()
     }
 
@@ -232,4 +479,33 @@ fn now_epoch() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use snail_core::store::NewIdentity;
+
+    #[test]
+    fn signatures_are_resolved_per_identity_case_insensitively() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let account = store
+            .insert_account("gmail", "me@example.com", Some("Me"), 0)
+            .unwrap();
+        store
+            .insert_identity(&NewIdentity {
+                account_id: account,
+                address: "Alias@Example.com".into(),
+                display_name: Some("Alias".into()),
+                signature: Some("Regards,\nAlias".into()),
+                is_default: true,
+            })
+            .unwrap();
+        let model = MailModel::new(store);
+        assert_eq!(
+            model.signature_for(Some("alias@example.COM")).as_deref(),
+            Some("Regards,\nAlias")
+        );
+        assert_eq!(model.signature_for(Some("other@example.com")), None);
+    }
 }

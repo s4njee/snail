@@ -1,0 +1,19 @@
+MIME-Version: 1.0
+Content-Type: multipart/signed; protocol="application/pgp-signature";
+ boundary="thunderbird-boundary"; micalg=pgp-sha256
+
+This is an OpenPGP/MIME signed message (RFC 4880 and 3156)
+--thunderbird-boundary
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+Hello from Thunderbird.
+--thunderbird-boundary
+Content-Type: application/pgp-signature; name="OpenPGP_signature.asc"
+Content-Disposition: attachment; filename="OpenPGP_signature.asc"
+
+-----BEGIN PGP SIGNATURE-----
+
+ZmFrZQ==
+-----END PGP SIGNATURE-----
+--thunderbird-boundary--

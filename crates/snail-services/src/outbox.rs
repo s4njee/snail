@@ -27,11 +27,23 @@ pub fn drain_sends(
     limit: u32,
     now: i64,
 ) -> Result<SendReport> {
+    drain_sends_for(store, provider, None, limit, now)
+}
+
+/// [`drain_sends`] for one account's queue only, so each provider sends only its own mail.
+pub fn drain_sends_for(
+    store: &Store,
+    provider: &dyn MailProvider,
+    account_id: Option<i64>,
+    limit: u32,
+    now: i64,
+) -> Result<SendReport> {
     let mut report = SendReport::default();
     for op in store
         .pending_ops(limit)?
         .into_iter()
         .filter(|op| op.operation == "send")
+        .filter(|op| account_id.is_none_or(|id| op.account_id == id))
     {
         let hash = op
             .payload_json
@@ -113,7 +125,8 @@ fn record_sent_copy(store: &Store, account_id: i64, raw: &[u8], now: i64) -> Res
 }
 
 #[cfg(test)]
-mod tests {    use super::*;
+mod tests {
+    use super::*;
     use anyhow::{Result, bail};
     use snail_core::providers::{Changes, OpOutcome, RawMessage, RemoteOp};
     use snail_core::store::{NewOp, SyncState};
@@ -159,11 +172,20 @@ mod tests {    use super::*;
     #[test]
     fn a_queued_send_is_delivered_and_marked_done() {
         let store = Store::open_in_memory().unwrap();
-        store.insert_account("gmail", "me@example.com", None, 0).unwrap();
+        store
+            .insert_account("gmail", "me@example.com", None, 0)
+            .unwrap();
         queued_send(&store, b"raw message", "send:1");
 
         let report = drain_sends(&store, &FakeProvider { succeeds: true }, 10, 0).unwrap();
-        assert_eq!(report, SendReport { sent: 1, failed: 0, dead: 0 });
+        assert_eq!(
+            report,
+            SendReport {
+                sent: 1,
+                failed: 0,
+                dead: 0
+            }
+        );
         // A delivered op is no longer pending.
         assert!(store.pending_ops(10).unwrap().is_empty());
         // The sent copy landed in the local Sent mailbox (E7.11).
@@ -174,7 +196,9 @@ mod tests {    use super::*;
     #[test]
     fn failures_retry_until_the_cap_then_go_dead() {
         let store = Store::open_in_memory().unwrap();
-        store.insert_account("gmail", "me@example.com", None, 0).unwrap();
+        store
+            .insert_account("gmail", "me@example.com", None, 0)
+            .unwrap();
         queued_send(&store, b"raw message", "send:1");
         let provider = FakeProvider { succeeds: false };
 
@@ -187,13 +211,18 @@ mod tests {    use super::*;
         let report = drain_sends(&store, &provider, 10, 0).unwrap();
         assert_eq!(report.dead, 1);
         assert_eq!(store.op_counts().unwrap().dead, 1);
-        assert!(store.pending_ops(10).unwrap().is_empty(), "dead ops are not retried");
+        assert!(
+            store.pending_ops(10).unwrap().is_empty(),
+            "dead ops are not retried"
+        );
     }
 
     #[test]
     fn an_op_with_no_raw_hash_is_dead_lettered_rather_than_looping() {
         let store = Store::open_in_memory().unwrap();
-        store.insert_account("gmail", "me@example.com", None, 0).unwrap();
+        store
+            .insert_account("gmail", "me@example.com", None, 0)
+            .unwrap();
         store
             .enqueue_op(&NewOp {
                 account_id: 1,

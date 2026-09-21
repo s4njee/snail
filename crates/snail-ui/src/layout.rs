@@ -28,11 +28,12 @@ pub enum Fragment {
         color: Color,
         radius: f32,
     },
-    /// A stroked rectangle border.
+    /// A stroked rectangle border, rounded by `radius`.
     Border {
         rect: Rect,
         color: Color,
         width: f32,
+        radius: f32,
     },
     /// A single laid-out word, positioned by its top-left corner.
     Word {
@@ -42,10 +43,19 @@ pub enum Fragment {
         font: FontSpec,
         color: Color,
         underline: bool,
+        strike: bool,
         href: Option<String>,
     },
-    /// A reserved image box.
-    Image { rect: Rect, src: String },
+    /// A reserved image box, and the link it opens when it sits inside `<a href>`.
+    Image {
+        rect: Rect,
+        src: String,
+        href: Option<String>,
+        /// A CSS `background-image` rather than an `<img>`. One that cannot be shown draws
+        /// nothing — the box keeps its background colour — where a missing `<img>` gets a
+        /// placeholder.
+        background: bool,
+    },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -159,6 +169,7 @@ enum Token {
         font: FontSpec,
         color: Color,
         underline: bool,
+        strike: bool,
         href: Option<String>,
         vertical_align: VerticalAlign,
     },
@@ -167,6 +178,7 @@ enum Token {
         width: f32,
         height: f32,
         vertical_align: VerticalAlign,
+        href: Option<String>,
     },
     Break,
 }
@@ -179,6 +191,7 @@ enum LineItem {
         font: FontSpec,
         color: Color,
         underline: bool,
+        strike: bool,
         href: Option<String>,
         vertical_align: VerticalAlign,
     },
@@ -188,6 +201,7 @@ enum LineItem {
         width: f32,
         height: f32,
         vertical_align: VerticalAlign,
+        href: Option<String>,
     },
 }
 
@@ -254,13 +268,52 @@ fn layout_children(
     let mut tokens: Vec<Token> = Vec::new();
     let mut list_index = 0usize;
 
-    for node in nodes {
+    let mut index = 0;
+    while index < nodes.len() {
+        let node = &nodes[index];
+        index += 1;
+        // A run of side-by-side boxes: `<table align="left">` columns, or `inline-block`
+        // columns with a set width. Laid out in rows, wrapping when the next one does not fit.
+        if let Node::Element(element) = node
+            && sits_side_by_side(element, width)
+        {
+            let mut run = vec![element];
+            while let Some(next) = nodes.get(index) {
+                match next {
+                    Node::Text(text) if text.trim().is_empty() => index += 1,
+                    Node::Element(next) if next.style.display == Display::None => index += 1,
+                    Node::Element(next) if sits_side_by_side(next, width) => {
+                        run.push(next);
+                        index += 1;
+                    }
+                    // A table right after a float takes the space beside it, as a block that
+                    // starts a new formatting context does in CSS. It ends the run.
+                    Node::Element(next)
+                        if next.style.display == Display::Table
+                            && is_floated(run[run.len() - 1]) =>
+                    {
+                        run.push(next);
+                        index += 1;
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+            cursor += flush(&mut tokens, x, cursor, width, parent, out, measure);
+            cursor += layout_side_by_side(&run, x, cursor, width, parent, out, measure);
+            continue;
+        }
         match node {
             Node::Text(text) => push_words(text, parent, None, &mut tokens),
             Node::Element(element) => {
                 if element.style.display == Display::None {
                     continue;
                 }
+                // An `<a href>` laid out as a block (the usual `<a><img style="display:block"></a>`
+                // of email) links everything drawn inside it that has no link of its own.
+                let link = (element.tag == "a")
+                    .then(|| element.attrs.get("href"))
+                    .flatten();
                 if element.tag == "img" {
                     cursor += flush(&mut tokens, x, cursor, width, parent, out, measure);
                     cursor += layout_standalone_image(element, x, cursor, width, out);
@@ -274,13 +327,16 @@ fn layout_children(
                 }
                 if element.style.display == Display::InlineBlock && has_box_decoration(element) {
                     cursor += flush(&mut tokens, x, cursor, width, parent, out, measure);
+                    let start = out.len();
                     cursor += layout_inline_box(element, x, cursor, width, out, measure);
+                    link_fragments(&mut out[start..], link);
                     continue;
                 }
                 match element.style.display {
                     Display::Inline if element.tag == "br" => tokens.push(Token::Break),
                     Display::Inline | Display::InlineBlock if has_block_content(element) => {
                         cursor += flush(&mut tokens, x, cursor, width, parent, out, measure);
+                        let start = out.len();
                         cursor += layout_children(
                             &element.children,
                             x,
@@ -290,13 +346,16 @@ fn layout_children(
                             out,
                             measure,
                         );
+                        link_fragments(&mut out[start..], link);
                     }
                     Display::Inline | Display::InlineBlock => {
                         collect_inline(std::slice::from_ref(node), parent, None, width, &mut tokens)
                     }
                     Display::Table => {
                         cursor += flush(&mut tokens, x, cursor, width, parent, out, measure);
+                        let start = out.len();
                         cursor += layout_table(element, x, cursor, width, out, measure);
+                        link_fragments(&mut out[start..], link);
                     }
                     _ if element.tag == "hr" => {
                         cursor += flush(&mut tokens, x, cursor, width, parent, out, measure);
@@ -307,14 +366,17 @@ fn layout_children(
                                 w: width,
                                 h: 1.0,
                             },
-                            color: [0xd9, 0xd4, 0xcc, 0xff],
+                            color: [0xd5, 0xd5, 0xd5, 0xff],
                             width: 0.0,
+                            radius: 0.0,
                         });
                         cursor += 12.0;
                     }
                     _ => {
                         cursor += flush(&mut tokens, x, cursor, width, parent, out, measure);
+                        let start = out.len();
                         cursor += layout_block(element, x, cursor, width, out, measure);
+                        link_fragments(&mut out[start..], link);
                     }
                 }
             }
@@ -322,6 +384,141 @@ fn layout_children(
     }
     cursor += flush(&mut tokens, x, cursor, width, parent, out, measure);
     cursor - y
+}
+
+/// Give `href` to every word and image in `fragments` that is not already a link. Inner links
+/// win, as in HTML, where the innermost `<a>` is the one that is followed.
+fn link_fragments(fragments: &mut [Fragment], href: Option<&String>) {
+    let Some(href) = href else {
+        return;
+    };
+    for fragment in fragments {
+        match fragment {
+            Fragment::Word { href: slot, .. } | Fragment::Image { href: slot, .. }
+                if slot.is_none() =>
+            {
+                *slot = Some(href.clone());
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Whether `element` is laid out beside its neighbours rather than below them: a table floated
+/// with the legacy `align="left|right"` attribute (how older mail puts an image beside its
+/// text), or an `inline-block` block container narrower than the line (how "hybrid" mail builds
+/// columns that stack on phones).
+fn sits_side_by_side(element: &Element, available: f32) -> bool {
+    let floated = is_floated(element);
+    let column = element.style.display == Display::InlineBlock
+        && has_block_content(element)
+        && (element.style.width.is_some() || element.style.width_percent.is_some());
+    (floated || column) && resolved_width(&element.style, available) < available - 0.5
+}
+
+/// A table floated with the legacy `align="left|right"` attribute.
+fn is_floated(element: &Element) -> bool {
+    element.style.display == Display::Table
+        && element
+            .attrs
+            .get("align")
+            .is_some_and(|align| matches!(align.to_ascii_lowercase().as_str(), "left" | "right"))
+}
+
+/// Lay a run of side-by-side boxes out in rows. Each box takes its own width; a box that does not
+/// fit starts a new row; a row is as tall as its tallest box. Right-floated tables sit at the
+/// right edge; `inline-block` columns follow the parent's `text-align`, as inline content does.
+fn layout_side_by_side(
+    run: &[&Element],
+    x: f32,
+    y: f32,
+    available: f32,
+    parent: &Style,
+    out: &mut Vec<Fragment>,
+    measure: &dyn TextMeasure,
+) -> f32 {
+    struct Placed {
+        fragments: Vec<Fragment>,
+        width: f32,
+        right: bool,
+    }
+    let mut rows: Vec<(Vec<Placed>, f32)> = Vec::new();
+    let mut row: Vec<Placed> = Vec::new();
+    let mut row_width = 0.0f32;
+    let mut row_height = 0.0f32;
+    let mut row_top = y;
+    for element in run {
+        // The table after a float (see the run above) gets whatever the row has left, and
+        // centres or aligns itself inside that, the way `layout_table` does in any container.
+        let beside = !is_floated(element) && element.style.display == Display::Table;
+        let remaining = available - row_width;
+        let fits_beside = beside
+            && !row.is_empty()
+            && resolved_width(&element.style, remaining) <= remaining + 0.5
+            && element
+                .style
+                .width
+                .is_none_or(|width| width <= remaining + 0.5);
+        let width = if fits_beside {
+            remaining
+        } else if beside {
+            available
+        } else {
+            resolved_width(&element.style, available)
+        };
+        if !row.is_empty() && (row_width + width > available + 0.5 || (beside && !fits_beside)) {
+            rows.push((std::mem::take(&mut row), row_height));
+            row_top += row_height;
+            row_width = 0.0;
+            row_height = 0.0;
+        }
+        let mut fragments = Vec::new();
+        let height = if element.style.display == Display::Table {
+            layout_table(element, 0.0, row_top, width, &mut fragments, measure)
+        } else {
+            layout_block(element, 0.0, row_top, width, &mut fragments, measure)
+        };
+        let right = element.style.display == Display::Table
+            && element
+                .attrs
+                .get("align")
+                .is_some_and(|align| align.eq_ignore_ascii_case("right"));
+        row.push(Placed {
+            fragments,
+            width,
+            right,
+        });
+        row_width += width;
+        row_height = row_height.max(height);
+    }
+    if !row.is_empty() {
+        rows.push((row, row_height));
+    }
+    let mut total = 0.0;
+    for (row, height) in rows {
+        let used: f32 = row.iter().map(|placed| placed.width).sum();
+        let columns = row.iter().all(|placed| !placed.right);
+        let mut left = x + match parent.align {
+            Align::Center if columns => ((available - used) / 2.0).max(0.0),
+            Align::Right if columns => (available - used).max(0.0),
+            _ => 0.0,
+        };
+        let mut right_edge = x + available;
+        for mut placed in row {
+            let at = if placed.right {
+                right_edge -= placed.width;
+                right_edge
+            } else {
+                let at = left;
+                left += placed.width;
+                at
+            };
+            translate_fragments(&mut placed.fragments, at, 0.0);
+            out.append(&mut placed.fragments);
+        }
+        total += height;
+    }
+    total
 }
 
 fn has_box_decoration(element: &Element) -> bool {
@@ -400,13 +597,15 @@ fn layout_inline_box(
         out.push(Fragment::Rect {
             rect,
             color,
-            radius: 0.0,
+            radius: resolve_radius(&element.style, rect),
         });
     }
     if let Some(src) = &element.style.background_image {
         out.push(Fragment::Image {
             rect,
             src: src.clone(),
+            href: None,
+            background: true,
         });
     }
     emit_border(out, rect, &element.style);
@@ -444,6 +643,7 @@ fn layout_list_item(
             font,
             color: element.style.color,
             underline: false,
+            strike: false,
             href: None,
         });
     }
@@ -556,21 +756,44 @@ fn layout_standalone_image(
         width = available;
         height *= scale;
     }
-    let image_x = match element.style.align {
+    // The image's own box: `width`/`height` are its content; padding and border sit outside,
+    // as for any CSS box (the product-image frame `border: 1px solid #eee; border-radius: 4px`).
+    let style = &element.style;
+    let [border_top, border_right, border_bottom, border_left] = border_widths(style);
+    let inset_x = border_left + border_right + style.padding_left + style.padding_right;
+    let inset_y = border_top + border_bottom + style.padding_top + style.padding_bottom;
+    let box_width = width + inset_x;
+    let box_x = match style.align {
         Align::Left => x,
-        Align::Center => x + ((available - width) / 2.0).max(0.0),
-        Align::Right => x + (available - width).max(0.0),
+        Align::Center => x + ((available - box_width) / 2.0).max(0.0),
+        Align::Right => x + (available - box_width).max(0.0),
     };
+    let frame = Rect {
+        x: box_x,
+        y,
+        w: box_width,
+        h: height + inset_y,
+    };
+    if let Some(color) = style.background {
+        out.push(Fragment::Rect {
+            rect: frame,
+            color,
+            radius: resolve_radius(style, frame),
+        });
+    }
     out.push(Fragment::Image {
         rect: Rect {
-            x: image_x,
-            y,
+            x: box_x + border_left + style.padding_left,
+            y: y + border_top + style.padding_top,
             w: width,
             h: height,
         },
         src: element.attrs.get("src").cloned().unwrap_or_default(),
+        href: None,
+        background: false,
     });
-    height
+    emit_border(out, frame, style);
+    height + inset_y
 }
 
 fn layout_block(
@@ -613,15 +836,16 @@ fn layout_block(
     let total_h = (inner_h + vertical_inset).max(requested_height);
 
     if let Some(background) = style.background {
+        let rect = Rect {
+            x: box_x,
+            y: y + style.margin_top,
+            w: box_w,
+            h: total_h,
+        };
         out.push(Fragment::Rect {
-            rect: Rect {
-                x: box_x,
-                y: y + style.margin_top,
-                w: box_w,
-                h: total_h,
-            },
+            rect,
             color: background,
-            radius: 0.0,
+            radius: resolve_radius(style, rect),
         });
     }
     // A CSS background image sits above the colour and below the content (E6.8).
@@ -634,6 +858,8 @@ fn layout_block(
                 h: total_h,
             },
             src: src.clone(),
+            href: None,
+            background: true,
         });
     }
     emit_border(
@@ -671,19 +897,46 @@ fn border_widths(style: &Style) -> [f32; 4] {
     ]
 }
 
+/// The corner radius for a box of `rect`'s size: CSS clamps it to half the shorter side, which is
+/// what turns `border-radius: 50px` on a short button into a pill.
+pub fn resolve_radius(style: &Style, rect: Rect) -> f32 {
+    let half = rect.w.min(rect.h) / 2.0;
+    let radius = if style.border_radius < 0.0 {
+        // A percentage, of the shorter side.
+        -style.border_radius / 100.0 * rect.w.min(rect.h)
+    } else {
+        style.border_radius
+    };
+    radius.min(half).max(0.0)
+}
+
 fn emit_border(out: &mut Vec<Fragment>, rect: Rect, style: &Style) {
-    let [top, right, bottom, left] = border_widths(style);
-    if top == right && right == bottom && bottom == left {
-        if top > 0.0 {
-            out.push(Fragment::Border {
-                rect,
-                color: style.border_color,
-                width: top,
-            });
-        }
+    let widths = border_widths(style);
+    let fallback = style.border_color.unwrap_or(style.color);
+    let colors = style.border_colors.map(|side| side.unwrap_or(fallback));
+    // A side painted the same colour as the box's background is already drawn by the background,
+    // which covers the border box. Drawing it again as a square-cornered strip would square off a
+    // rounded button whose "padding" is a same-coloured border (a common email-button trick).
+    let visible: [bool; 4] =
+        std::array::from_fn(|side| widths[side] > 0.0 && Some(colors[side]) != style.background);
+    if !visible.iter().any(|shown| *shown) {
         return;
     }
-    for edge in [
+    let radius = resolve_radius(style, rect);
+    let uniform = visible.iter().all(|shown| *shown)
+        && widths.iter().all(|width| *width == widths[0])
+        && colors.iter().all(|color| *color == colors[0]);
+    if uniform {
+        out.push(Fragment::Border {
+            rect,
+            color: colors[0],
+            width: widths[0],
+            radius,
+        });
+        return;
+    }
+    let [top, right, bottom, left] = widths;
+    let edges = [
         Rect {
             x: rect.x,
             y: rect.y,
@@ -708,11 +961,12 @@ fn emit_border(out: &mut Vec<Fragment>, rect: Rect, style: &Style) {
             w: left,
             h: rect.h,
         },
-    ] {
-        if edge.w > 0.0 && edge.h > 0.0 {
+    ];
+    for (side, edge) in edges.into_iter().enumerate() {
+        if visible[side] && edge.w > 0.0 && edge.h > 0.0 {
             out.push(Fragment::Rect {
                 rect: edge,
-                color: style.border_color,
+                color: colors[side],
                 radius: 0.0,
             });
         }
@@ -934,13 +1188,15 @@ fn layout_table(
             out.push(Fragment::Rect {
                 rect,
                 color: background,
-                radius: 0.0,
+                radius: resolve_radius(&element.style, rect),
             });
         }
         if let Some(src) = &element.style.background_image {
             out.push(Fragment::Image {
                 rect,
                 src: src.clone(),
+                href: None,
+                background: true,
             });
         }
         emit_border(out, rect, &element.style);
@@ -1136,13 +1392,16 @@ fn collect_inline(
             Node::Element(element) => match element.style.display {
                 Display::None => {}
                 Display::Inline if element.tag == "br" => out.push(Token::Break),
-                Display::Inline if element.tag == "img" => {
+                // `display:inline-block` on an `<img>` changes nothing about it — it is already an
+                // atomic inline box. Taking only `Inline` here dropped every icon styled that way.
+                Display::Inline | Display::InlineBlock if element.tag == "img" => {
                     let (width, height) = replaced_size(element, available);
                     out.push(Token::Image {
                         src: element.attrs.get("src").cloned().unwrap_or_default(),
                         width,
                         height,
                         vertical_align: element.style.vertical_align,
+                        href: href.map(str::to_string),
                     });
                 }
                 Display::Inline | Display::InlineBlock => {
@@ -1182,6 +1441,7 @@ fn push_words(text: &str, style: &Style, href: Option<&str>, out: &mut Vec<Token
             font: font.clone(),
             color: style.color,
             underline: style.underline,
+            strike: style.strike,
             href: href.map(str::to_string),
             vertical_align: style.vertical_align,
         });
@@ -1222,6 +1482,7 @@ fn flush(
                 font,
                 color,
                 underline,
+                strike,
                 href,
                 vertical_align,
             } => {
@@ -1249,6 +1510,7 @@ fn flush(
                     font,
                     color,
                     underline,
+                    strike,
                     href,
                     vertical_align,
                 });
@@ -1258,6 +1520,7 @@ fn flush(
                 width: mut image_width,
                 height: mut image_height,
                 vertical_align,
+                href,
             } => {
                 if image_width > width {
                     let scale = width / image_width;
@@ -1277,6 +1540,7 @@ fn flush(
                     width: image_width,
                     height: image_height,
                     vertical_align,
+                    href,
                 });
             }
         }
@@ -1300,6 +1564,7 @@ fn flush(
                     font,
                     color,
                     underline,
+                    strike,
                     href,
                     vertical_align,
                 } => out.push(Fragment::Word {
@@ -1309,6 +1574,7 @@ fn flush(
                     font,
                     color,
                     underline,
+                    strike,
                     href,
                 }),
                 LineItem::Image {
@@ -1317,7 +1583,10 @@ fn flush(
                     width,
                     height,
                     vertical_align,
+                    href,
                 } => out.push(Fragment::Image {
+                    href,
+                    background: false,
                     rect: Rect {
                         x: x + offset + item_x,
                         y: cursor + vertical_offset(vertical_align, line.height, height),
@@ -1476,7 +1745,7 @@ mod tests {
         let layout = layout(&[Node::Element(link)], 200.0, &Fake);
         assert!(matches!(
             layout.fragments.as_slice(),
-            [Fragment::Image { rect, src }] if *rect == Rect { x: 0.0, y: 0.0, w: 80.0, h: 40.0 } && src == "cid:hero"
+            [Fragment::Image { rect, src, .. }] if *rect == Rect { x: 0.0, y: 0.0, w: 80.0, h: 40.0 } && src == "cid:hero"
         ));
         assert_eq!(layout.height, 40.0);
     }
@@ -1809,5 +2078,176 @@ mod tests {
             fragment,
             Fragment::Word { href: Some(target), .. } if target == "https://example.com"
         )));
+    }
+
+    fn linked(tag_display: Display) -> Node {
+        let mut image = element("img", vec![]);
+        image.style.display = Display::Block;
+        image.attrs.insert("src".into(), "cid:logo".into());
+        image.attrs.insert("width".into(), "120".into());
+        image.attrs.insert("height".into(), "40".into());
+        let mut link = element("a", vec![]);
+        link.style.display = tag_display;
+        link.attrs
+            .insert("href".into(), "https://shop.example".into());
+        link.children.push(Node::Element(image));
+        Node::Element(link)
+    }
+
+    // Regression (Samsung): `<a href><img style="display:block"></a>` — every logo, nav item and
+    // banner in a marketing email — drew the image but dropped the link.
+    #[test]
+    fn a_block_image_inside_a_link_is_the_link() {
+        for display in [Display::Inline, Display::Block] {
+            let layout = layout(&[linked(display)], 600.0, &Fake);
+            let hrefs: Vec<_> = layout
+                .fragments
+                .iter()
+                .filter_map(|fragment| match fragment {
+                    Fragment::Image { href, .. } => Some(href.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                hrefs,
+                vec![Some("https://shop.example".to_string())],
+                "{display:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_inline_image_inside_a_link_is_the_link_and_inner_links_win() {
+        let mut image = element("img", vec![]);
+        image.attrs.insert("src".into(), "cid:icon".into());
+        image.attrs.insert("width".into(), "16".into());
+        image.attrs.insert("height".into(), "16".into());
+        let mut inner = element("a", vec![]);
+        inner
+            .attrs
+            .insert("href".into(), "https://inner.example".into());
+        inner.children.push(Node::Text("inner".into()));
+        let mut outer = element("a", vec![]);
+        outer.style.display = Display::Block;
+        outer
+            .attrs
+            .insert("href".into(), "https://outer.example".into());
+        outer.children.push(Node::Element(image));
+        outer.children.push(Node::Element(inner));
+        let layout = layout(&[Node::Element(outer)], 600.0, &Fake);
+        let image_href = layout.fragments.iter().find_map(|fragment| match fragment {
+            Fragment::Image { href, .. } => Some(href.clone()),
+            _ => None,
+        });
+        assert_eq!(image_href, Some(Some("https://outer.example".into())));
+        let word_href = layout.fragments.iter().find_map(|fragment| match fragment {
+            Fragment::Word { text, href, .. } if text == "inner" => Some(href.clone()),
+            _ => None,
+        });
+        assert_eq!(word_href, Some(Some("https://inner.example".into())));
+    }
+
+    #[test]
+    fn a_radius_is_clamped_to_a_pill_and_percentages_resolve_on_the_short_side() {
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 300.0,
+            h: 50.0,
+        };
+        let mut style = Style::default();
+        style.border_radius = 50.0;
+        assert_eq!(resolve_radius(&style, rect), 25.0);
+        style.border_radius = -50.0;
+        assert_eq!(resolve_radius(&style, rect), 25.0);
+        style.border_radius = 8.0;
+        assert_eq!(resolve_radius(&style, rect), 8.0);
+    }
+
+    // The Slickdeals button: its border is its background colour, so only the rounded background
+    // is drawn — no square-cornered strips over the pill.
+    #[test]
+    fn a_border_matching_the_background_is_not_drawn_again() {
+        let mut style = Style::default();
+        style.background = Some([0x14, 0x6f, 0xf5, 0xff]);
+        style.border_top = Some(12.0);
+        style.border_left = Some(23.0);
+        style.border_colors = [Some([0x14, 0x6f, 0xf5, 0xff]); 4];
+        let mut out = Vec::new();
+        emit_border(
+            &mut out,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 200.0,
+                h: 40.0,
+            },
+            &style,
+        );
+        assert!(out.is_empty(), "{out:?}");
+        // A different colour still draws, per side.
+        style.border_colors[0] = Some([0, 0, 0, 0xff]);
+        emit_border(
+            &mut out,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 200.0,
+                h: 40.0,
+            },
+            &style,
+        );
+        assert_eq!(out.len(), 1);
+    }
+
+    fn one_cell_table(text: &str, width: f32, align: Option<&str>) -> Node {
+        let cell = element("td", vec![Node::Text(text.into())]);
+        let row = element("tr", vec![Node::Element(cell)]);
+        let mut table = element("table", vec![Node::Element(row)]);
+        table.style.width = Some(width);
+        if let Some(align) = align {
+            table.attrs.insert("align".into(), align.into());
+        }
+        Node::Element(table)
+    }
+
+    fn x_of(layout: &Layout, word: &str) -> (f32, f32) {
+        layout
+            .words()
+            .find(|(text, ..)| *text == word)
+            .map(|(_, x, y, _)| (x, y))
+            .unwrap()
+    }
+
+    // Regression (Slickdeals): an image column `<table align="left">` and the text table after
+    // it sit side by side when they fit, as in Apple Mail — and stack when they do not.
+    #[test]
+    fn a_floated_table_and_the_table_after_it_share_a_row_when_they_fit() {
+        let nodes = [
+            one_cell_table("image", 200.0, Some("left")),
+            one_cell_table("text", 300.0, None),
+        ];
+        let wide = layout(&nodes, 600.0, &Fake);
+        let (image_x, image_y) = x_of(&wide, "image");
+        let (text_x, text_y) = x_of(&wide, "text");
+        assert_eq!(image_y, text_y, "same row");
+        assert!(text_x >= image_x + 200.0, "text beside the image: {text_x}");
+
+        let narrow = layout(&nodes, 400.0, &Fake);
+        assert!(
+            x_of(&narrow, "text").1 > x_of(&narrow, "image").1,
+            "stacked when it cannot fit"
+        );
+    }
+
+    #[test]
+    fn a_right_floated_table_sits_at_the_right_edge() {
+        let nodes = [
+            one_cell_table("left", 100.0, Some("left")),
+            one_cell_table("right", 100.0, Some("right")),
+        ];
+        let out = layout(&nodes, 600.0, &Fake);
+        assert_eq!(x_of(&out, "left").1, x_of(&out, "right").1);
+        assert!(x_of(&out, "right").0 >= 500.0, "{:?}", x_of(&out, "right"));
     }
 }

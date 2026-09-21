@@ -7,7 +7,7 @@ members = [
 ]
 # Spikes are throwaway binaries in their own workspaces (plan.md E0). Exclude them explicitly so a
 # spike's lockfile and target/ are never dragged into the app's resolution.
-exclude = ["spikes"]
+exclude = ["spikes", "fuzz"]
 resolver = "2"
 
 [workspace.package]

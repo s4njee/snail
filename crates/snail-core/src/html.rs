@@ -93,6 +93,9 @@ pub fn sanitize_document(source: &str) -> SanitizedDocument {
             "strong",
             "sub",
             "sup",
+            "s",
+            "strike",
+            "del",
             "table",
             "tbody",
             "td",
@@ -103,8 +106,11 @@ pub fn sanitize_document(source: &str) -> SanitizedDocument {
             "u",
             "ul",
         ]))
+        // Dropped with their content. `title` is here because email templates paste whole
+        // documents into the body — `<!doctype html><html><head><title>Untitled Document…` — and
+        // a `<title>` there still parses, as text a browser never shows.
         .clean_content_tags(HashSet::from([
-            "head", "style", "script", "iframe", "object", "form",
+            "head", "style", "script", "iframe", "object", "form", "title",
         ]))
         .generic_attributes(HashSet::from([
             "style",
@@ -212,6 +218,20 @@ fn supported_style_properties() -> HashSet<&'static str> {
         "border-left",
         "border-width",
         "border-color",
+        "border-style",
+        "border-radius",
+        "border-top-width",
+        "border-right-width",
+        "border-bottom-width",
+        "border-left-width",
+        "border-top-style",
+        "border-right-style",
+        "border-bottom-style",
+        "border-left-style",
+        "border-top-color",
+        "border-right-color",
+        "border-bottom-color",
+        "border-left-color",
         "width",
         "height",
         "max-width",
@@ -319,6 +339,10 @@ fn strip_document_head(html: &str) -> String {
 }
 
 fn extract_styles(html: &str) -> String {
+    // A `<style>` inside a comment is not a stylesheet. Outlook's `<!--[if mso]><style>…` blocks
+    // are exactly that to every other client, and they carry rules like
+    // `p { margin: 0 !important }` that would flatten the real layout.
+    let html = &strip_comments(html);
     let lower = html.to_ascii_lowercase();
     let mut output = String::new();
     let mut cursor = 0;
@@ -337,6 +361,49 @@ fn extract_styles(html: &str) -> String {
         cursor = end + 8;
     }
     output
+}
+
+/// Remove `<!-- … -->` comments as an HTML parser would. The "downlevel-revealed" form
+/// `<!--[if !mso]><!-->…<!--<![endif]-->` is two short comments around live content, so its
+/// content survives, as it does in a browser.
+///
+/// Inside `<style>` nothing is a comment: `<style><!-- .x { … } --></style>` is the old way of
+/// hiding CSS from ancient browsers, and CSS itself ignores those markers, so it is copied as is.
+fn strip_comments(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let mut output = String::with_capacity(html.len());
+    let mut at = 0;
+    loop {
+        let comment = lower[at..].find("<!--").map(|found| at + found);
+        let style = lower[at..].find("<style").map(|found| at + found);
+        match (comment, style) {
+            (Some(comment), style) if style.is_none_or(|style| comment < style) => {
+                output.push_str(&html[at..comment]);
+                match lower[comment + 4..].find("-->") {
+                    Some(end) => at = comment + 4 + end + 3,
+                    None => return output,
+                }
+            }
+            (_, Some(style)) => {
+                let end = lower[style..]
+                    .find("</style")
+                    .map(|found| style + found)
+                    .unwrap_or(html.len());
+                output.push_str(&html[at..end]);
+                at = end;
+                if at == html.len() {
+                    return output;
+                }
+                // Step past `</style` so the next search starts after it.
+                output.push_str(&html[at..at + 7]);
+                at += 7;
+            }
+            _ => {
+                output.push_str(&html[at..]);
+                return output;
+            }
+        }
+    }
 }
 
 fn build_children(handle: &Handle, output: &mut Vec<HtmlNode>, count: &mut usize) {
@@ -460,6 +527,40 @@ mod tests {
         );
         assert!(!document.html.contains("https://tracker.test"));
         assert!(document.html.matches(REMOTE_TOKEN_PREFIX).count() >= 2);
+    }
+
+    // Regression (Samsung): a template pasted a whole second document into the body, and its
+    // `<title>Untitled Document</title>` rendered as a line of text between two banners.
+    #[test]
+    fn a_title_inside_the_body_is_not_text() {
+        let document = sanitize_document(
+            "<body><p>Before</p><!doctype html><html><head><meta charset=\"utf-8\">\
+             <title>Untitled Document</title></head><body></body></html><p>After</p></body>",
+        );
+        assert!(!document.html.contains("Untitled"), "{}", document.html);
+        assert!(!document.plain_text.contains("Untitled"));
+        assert!(document.plain_text.contains("Before") && document.plain_text.contains("After"));
+    }
+
+    // Regression (Slickdeals): an Outlook-only `<!--[if mso]><style>` block zeroed every
+    // paragraph margin once `!important` rules were honoured.
+    #[test]
+    fn styles_inside_comments_are_not_stylesheets() {
+        let document = sanitize_document(
+            "<head><!--[if mso]><style>p { margin: 0 !important }</style><![endif]-->\
+             <!--[if !mso]><!--><style>.shown { color: red }</style><!--<![endif]-->\
+             <style>.real { color: blue }</style></head><body><p>x</p></body>",
+        );
+        assert!(
+            !document.stylesheet.contains("margin: 0"),
+            "{}",
+            document.stylesheet
+        );
+        assert!(document.stylesheet.contains(".shown"));
+        assert!(document.stylesheet.contains(".real"));
+        // The old CSS-hiding convention keeps its rules.
+        let hidden = sanitize_document("<style><!--\n.kept { color: red }\n--></style><p>x</p>");
+        assert!(hidden.stylesheet.contains(".kept"), "{}", hidden.stylesheet);
     }
 
     #[test]

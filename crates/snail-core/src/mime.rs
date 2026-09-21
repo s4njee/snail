@@ -158,12 +158,27 @@ pub fn parse_raw_with_preference(
             .unwrap_or_default(),
     };
 
-    // The preview comes from the plain-text view of whichever body we chose.
-    let preview_source = plain
+    // The preview is the message as it reads: the HTML's text as the sanitizer sees it (so
+    // styles, scripts and Outlook's `<!--[if mso]>` blocks are gone, and a hidden preheader —
+    // written to be the preview — comes first). A marketing message's "plain" part is often
+    // machine-made junk (its CSS, its JSON-LD, or nothing but whitespace), and mail-parser's own
+    // HTML-to-text keeps `<style>` bodies, so neither is trusted when HTML exists.
+    let html_text = html
+        .as_deref()
+        .map(|html| crate::html::sanitize_document(html).plain_text)
+        .filter(|text| !text.trim().is_empty());
+    let plain = plain.filter(|text| !text.trim().is_empty());
+    let preview_source = html_text
+        .clone()
+        .or_else(|| plain.clone())
         .or_else(|| message.body_text(0).map(|text| text.into_owned()))
         .unwrap_or_default();
     let preview = Some(collapse(&preview_source, PREVIEW_CHARS)).filter(|p| !p.is_empty());
-    let plain = Some(preview_source).filter(|text| !text.trim().is_empty());
+    // The plain body (search, "prefer plain text") is still the sender's plain part when it has
+    // any text at all.
+    let plain = plain
+        .or(html_text)
+        .or_else(|| Some(preview_source).filter(|text| !text.trim().is_empty()));
 
     let attachments = message
         .attachments()
@@ -344,6 +359,27 @@ pub fn inline_images(raw: &[u8]) -> Vec<InlineImage> {
     images
 }
 
+/// Extract the first iMIP `text/calendar` VEVENT from a mail message (E13.8). The event is parsed
+/// through the same iCalendar boundary as CalDAV, so RSVP UI never trusts ad-hoc header scraping.
+pub fn calendar_invite(raw: &[u8]) -> Option<crate::calendar::CalendarEvent> {
+    let message = MessageParser::default().parse(raw)?;
+    message.parts.iter().find_map(|part| {
+        let content_type = part.content_type()?;
+        if !content_type.ctype().eq_ignore_ascii_case("text")
+            || !content_type
+                .subtype()
+                .is_some_and(|value| value.eq_ignore_ascii_case("calendar"))
+        {
+            return None;
+        }
+        let text = match &part.body {
+            PartType::Text(text) | PartType::Html(text) => text.to_string(),
+            _ => String::from_utf8(part.contents().to_vec()).ok()?,
+        };
+        crate::ical::parse_event_resource("imip:invite", None, &text).ok()
+    })
+}
+
 fn header_text(value: &mail_parser::HeaderValue<'_>) -> Option<String> {
     use mail_parser::HeaderValue;
     let text = match value {
@@ -366,8 +402,24 @@ fn header_text(value: &mail_parser::HeaderValue<'_>) -> Option<String> {
 
 /// Collapse whitespace and clamp to `max` characters.
 pub fn collapse(input: &str, max: usize) -> String {
-    let collapsed = input.split_whitespace().collect::<Vec<_>>().join(" ");
+    let visible: String = input.chars().filter(|c| !is_invisible_filler(*c)).collect();
+    let collapsed = visible.split_whitespace().collect::<Vec<_>>().join(" ");
     collapsed.chars().take(max).collect()
+}
+
+/// Characters that draw nothing. Marketing mail pads its preheader with long runs of them
+/// (`&#847;&zwnj;&shy;` …) so the body does not show in the inbox preview; in ours they would
+/// only waste it.
+fn is_invisible_filler(c: char) -> bool {
+    matches!(
+        c,
+        '\u{034F}' // combining grapheme joiner
+            | '\u{00AD}' // soft hyphen
+            | '\u{180E}' // Mongolian vowel separator
+            | '\u{200B}'..='\u{200F}' // zero-width space, (non-)joiner, direction marks
+            | '\u{2060}'..='\u{2064}' // word joiner and invisible operators
+            | '\u{FEFF}' // zero-width no-break space
+    )
 }
 
 /// Strip the angle brackets a Message-ID may or may not carry.
@@ -528,5 +580,48 @@ Content-Disposition: attachment; filename=\"report.pdf\"\r\n\r\nPDFBYTES\r\n--BB
             Some("report.pdf")
         );
         assert!(parsed.attachments[0].size > 0);
+    }
+
+    #[test]
+    fn imip_calendar_invite_is_extracted_from_multipart_mail() {
+        let raw = b"From: host@example.com\r\nTo: guest@example.com\r\nSubject: Invitation\r\nMIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=X\r\n\r\n--X\r\nContent-Type: text/plain\r\n\r\nPlease join.\r\n--X\r\nContent-Type: text/calendar; method=REQUEST\r\n\r\nBEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:invite@example.com\r\nDTSTART:20260921T150000Z\r\nDTEND:20260921T160000Z\r\nSUMMARY:Project review\r\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:guest@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n--X--\r\n";
+        let event = calendar_invite(raw).unwrap();
+        assert_eq!(event.summary.as_deref(), Some("Project review"));
+        assert_eq!(event.attendees[0].email, "guest@example.com");
+    }
+
+    // Regression (Doctors Without Borders, and 66 others): an HTML-only message's preview began
+    // with its stylesheet — "div.preheader { display: none !important; } You can be…".
+    #[test]
+    fn preheader_padding_does_not_eat_the_preview() {
+        let padded = "One for the win column. \u{34f} \u{34f}\u{200c} \u{ad} \u{feff} Shop now";
+        assert_eq!(collapse(padded, 200), "One for the win column. Shop now");
+    }
+
+    // Regression (Old Navy, Coursera, Paper Source): the "plain" part was the sender's CSS or
+    // JSON-LD; the preview must come from the HTML the reader actually sees.
+    #[test]
+    fn a_junk_plain_part_does_not_become_the_preview() {
+        let raw = b"From: a@b.c\r\nSubject: s\r\nMIME-Version: 1.0\r\n\
+            Content-Type: multipart/alternative; boundary=B\r\n\r\n\
+            --B\r\nContent-Type: text/plain\r\n\r\n[ { \"@context\": \"http://schema.org/\" } ]\r\n\
+            --B\r\nContent-Type: text/html\r\n\r\n<p>$7 tees are going fast</p>\r\n--B--\r\n";
+        let parsed = parse_raw(raw).unwrap();
+        assert_eq!(parsed.preview.as_deref(), Some("$7 tees are going fast"));
+    }
+
+    #[test]
+    fn an_html_only_preview_skips_styles_and_outlook_blocks() {
+        let raw = b"From: a@b.c\r\nSubject: s\r\nContent-Type: text/html; charset=utf-8\r\n\r\n\
+            <html><body><style>div.preheader { display: none !important; }</style>\
+            <!--[if gte mso 9]><style>.x{color:red}</style><![endif]-->\
+            <div class=\"preheader\">You can be the connection</div><p>Give today.</p></body></html>";
+        let parsed = parse_raw(raw).unwrap();
+        let preview = parsed.preview.unwrap();
+        assert!(
+            preview.starts_with("You can be the connection"),
+            "{preview}"
+        );
+        assert!(!preview.contains('{'), "{preview}");
     }
 }

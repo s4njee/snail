@@ -72,18 +72,20 @@ pub struct Colors {
 }
 
 pub const LIGHT: Colors = Colors {
-    desk: [0xe8, 0xe4, 0xdc, 0xff],
-    chrome: [0xf2, 0xef, 0xe9, 0xff],
-    sunken: [0xf6, 0xf3, 0xee, 0xff],
-    canvas: [0xfa, 0xf8, 0xf5, 0xff],
+    // Owner, 2026-09-21: neutral greys, not the handoff's warm stone. Each grey keeps the
+    // luminance of the tone it replaced, so contrast and hierarchy are unchanged.
+    desk: [0xe4, 0xe4, 0xe4, 0xff],
+    chrome: [0xef, 0xef, 0xef, 0xff],
+    sunken: [0xf3, 0xf3, 0xf3, 0xff],
+    canvas: [0xf8, 0xf8, 0xf8, 0xff],
     card: [0xff, 0xff, 0xff, 0xff],
 
-    ink: [0x1b, 0x19, 0x17, 0xff],
-    body_ink: [0x24, 0x1f, 0x1b, 0xff],
-    secondary: [0x3f, 0x3a, 0x35, 0xff],
-    muted: [0x6f, 0x69, 0x63, 0xff],
-    soft: [0x8a, 0x83, 0x7b, 0xff],
-    faint: [0xa0, 0x98, 0x90, 0xff],
+    ink: [0x19, 0x19, 0x19, 0xff],
+    body_ink: [0x20, 0x20, 0x20, 0xff],
+    secondary: [0x3b, 0x3b, 0x3b, 0xff],
+    muted: [0x6a, 0x6a, 0x6a, 0xff],
+    soft: [0x84, 0x84, 0x84, 0xff],
+    faint: [0x99, 0x99, 0x99, 0xff],
 
     accent: [0x2c, 0x5f, 0xb8, 0xff],
     accent_hover: [0x23, 0x4e, 0x99, 0xff],
@@ -97,8 +99,8 @@ pub const LIGHT: Colors = Colors {
     border_strong: [0x00, 0x00, 0x00, 31],
     search_fill: [0x00, 0x00, 0x00, 11],
 
-    toggle_off: [0xdd, 0xd8, 0xd0, 0xff],
-    caret: [0xc9, 0xc2, 0xb9, 0xff],
+    toggle_off: [0xd9, 0xd9, 0xd9, 0xff],
+    caret: [0xc3, 0xc3, 0xc3, 0xff],
     account_dot_secondary: [0x7a, 0x8f, 0x6d, 0xff],
 
     classes: [0xc2, 0x41, 0x0c, 0xff],
@@ -154,7 +156,7 @@ pub const DARK: Colors = Colors {
     work: [0x2f, 0xa8, 0x9d, 0xff],
     birthdays: [0xa4, 0x8a, 0xd8, 0xff],
     home: [0xd0, 0x9a, 0x35, 0xff],
-    offline: [0x8a, 0x82, 0x79, 0xff],
+    offline: [0x83, 0x83, 0x83, 0xff],
     classes_tint: [0xe2, 0x72, 0x3f, 51],
     personal_tint: [0x5b, 0x93, 0xf0, 51],
     work_tint: [0x2f, 0xa8, 0x9d, 51],
@@ -298,9 +300,8 @@ impl Theme {
 /// Blend `fg` over `bg` using `fg`'s alpha, so translucent borders and tints can be measured.
 pub fn composite(fg: Color, bg: Color) -> Color {
     let alpha = fg[3] as f32 / 255.0;
-    let blend = |index: usize| {
-        (fg[index] as f32 * alpha + bg[index] as f32 * (1.0 - alpha)).round() as u8
-    };
+    let blend =
+        |index: usize| (fg[index] as f32 * alpha + bg[index] as f32 * (1.0 - alpha)).round() as u8;
     [blend(0), blend(1), blend(2), 0xff]
 }
 
@@ -340,7 +341,12 @@ mod tests {
             ("secondary/canvas", colors.secondary, colors.canvas, 4.5),
             ("secondary/card", colors.secondary, colors.card, 4.5),
             ("muted/canvas", colors.muted, colors.canvas, 4.5),
-            ("accent_text/accent_tint", colors.accent_text, colors.accent_tint, 4.5),
+            (
+                "accent_text/accent_tint",
+                colors.accent_text,
+                colors.accent_tint,
+                4.5,
+            ),
             ("accent/canvas", colors.accent, colors.canvas, 4.5),
             ("ok/card", colors.ok, colors.card, 4.5),
             ("danger/card", colors.danger, colors.card, 4.5),
@@ -390,7 +396,10 @@ mod tests {
         // Dark: a neutral dark-grey ground, with desk below it and chrome/sunken/card above
         // (owner, 2026-09-21).
         let dark = &DARK_THEME.colors;
-        assert!(luminance(dark.canvas) < 0.02, "dark canvas should be near-black");
+        assert!(
+            luminance(dark.canvas) < 0.02,
+            "dark canvas should be near-black"
+        );
         assert!(luminance(dark.desk) < luminance(dark.canvas));
         assert!(luminance(dark.canvas) < luminance(dark.chrome));
         assert!(luminance(dark.chrome) < luminance(dark.sunken));

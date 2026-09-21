@@ -13,17 +13,28 @@ use snail_core::store::{NewMessage, ProviderRef, Store};
 use snail_services::auth::GoogleOAuth;
 use std::sync::Arc;
 
-mod dev_overlay;
+mod calendar_model;
+mod calendar_view;
+mod commands;
 mod compose;
+mod dev_overlay;
+mod dock;
 mod frame_stats;
 mod html_view;
 mod icons;
 mod mail_model;
+mod notify;
+mod onboarding;
+mod pgp_keys;
+mod reminder_model;
 mod rss;
 mod settings;
+mod settings_model;
+mod settings_view;
 mod shell;
 mod startup;
 mod style;
+mod sync_model;
 mod tracked;
 
 fn main() {
@@ -68,7 +79,9 @@ fn main() {
         }
         std::process::exit(0);
     }
-    if args.iter().any(|arg| arg == "--fixture") {
+    let fixture_mode = args.iter().any(|arg| arg == "--fixture");
+    let test_notification = args.iter().any(|arg| arg == "--test-notification");
+    if fixture_mode {
         let store = Store::open(&paths).expect("open the fixture store");
         let count: i64 = store
             .with_db(|conn| {
@@ -99,8 +112,29 @@ fn main() {
             startup::mark("fonts");
 
             settings::install(settings_store.clone(), theme_pref, cx);
+            commands::install(cx);
             startup::mark("component_theme");
             let mail = mail_model::MailModel::new(store.clone());
+            let calendar = calendar_model::CalendarModel::new(store.clone());
+            let settings_model =
+                settings_model::SettingsModel::new(store.clone(), paths.clone(), mail.clone());
+            // Fixture and benchmark stores hold made-up accounts; never sync those (E0.5).
+            let sync_enabled = !fixture_mode && std::env::var_os("SNAIL_NO_SYNC").is_none();
+            let sync = sync_model::SyncHub::install(store.clone(), sync_enabled, cx);
+            // Before anything posts: GPUI's own permission request leaves out badges.
+            notify::request_permission();
+            let _reminders = reminder_model::ReminderHub::install(store.clone(), cx);
+            // A clicked new-mail notification opens its message (E16.8); the summary just
+            // brings the app forward.
+            cx.on_system_notification_response(|response, cx| {
+                cx.activate(true);
+                if let (Some(id), Some(hub)) = (
+                    notify::message_from_tag(&response.tag),
+                    sync_model::SyncHub::global(cx),
+                ) {
+                    hub.update(cx, |hub, cx| hub.open_message(id, cx));
+                }
+            });
             let bounds = Bounds::centered(None, size(px(1240.), px(820.)), cx);
             cx.open_window(
                 WindowOptions {
@@ -124,7 +158,9 @@ fn main() {
                     startup::mark("window_opened");
                     // `Root` as the shell's parent so popovers, dialogs and context menus have
                     // somewhere to render (plan.md E1.1).
-                    let shell = cx.new(|cx| shell::Shell::new(mail, window, cx));
+                    let shell = cx.new(|cx| {
+                        shell::Shell::new(mail, calendar, settings_model, sync, window, cx)
+                    });
                     startup::mark("shell_built");
                     let root = cx.new(|cx| Root::new(shell, window, cx));
                     startup::mark("root_built");
@@ -136,6 +172,17 @@ fn main() {
             .expect("the main window opens");
 
             cx.activate(true);
+
+            // `--test-notification`: post one sample notification, to check delivery and the
+            // permission prompt from a bundle (`scripts/bundle.sh`) without waiting for mail.
+            if test_notification {
+                cx.show_system_notification(gpui_kit::SystemNotification {
+                    tag: "test".into(),
+                    title: "Snail".into(),
+                    body: "Notifications are working.".into(),
+                    actions: Vec::new(),
+                });
+            }
         });
 }
 
@@ -231,7 +278,9 @@ fn run_store_cli(paths: &Paths, args: &[String]) -> anyhow::Result<()> {
             preview: parsed.preview,
             unread: true,
             has_attachments: !parsed.attachments.is_empty(),
-            body_text: parsed.plain.map(|plain| snail_core::mime::search_text(&plain)),
+            body_text: parsed
+                .plain
+                .map(|plain| snail_core::mime::search_text(&plain)),
             raw_hash: Some(raw_hash),
             ..Default::default()
         })?;

@@ -36,6 +36,11 @@ reqwest = { version = "0.12", default-features = false, features = [
     "gzip",
 ] }
 rfd = "0.17"
+rand = "0.8"
+# Only for the local UTC offset at an instant (the row timestamp); the date rules are snail-ui's.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono-tz = "0.10"
+iana-time-zone = "0.1"
 
 [features]
 default = ["profiler"]
@@ -46,3 +51,26 @@ profiler = ["gpui-kit/profiler"]
 # RSS sampling for the dev overlay (E0.8).
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
+# The Dock badge (E16.8): GPUI has no API for the Dock tile. Same versions GPUI's macOS backend uses.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSString",
+    "NSBundle",
+    "NSError",
+] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSDockTile",
+    "NSResponder",
+] }
+# Asking for notification permission *with badges* (E16.8): GPUI's own request covers alerts and
+# sounds only, and without badge permission the Dock hides the unread label.
+objc2-user-notifications = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "UNUserNotificationCenter",
+    "UNNotificationSettings",
+] }
+block2 = "0.6"

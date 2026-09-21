@@ -43,7 +43,9 @@ pub enum TriageAction {
     MarkRead(bool),
     MarkFlagged(bool),
     /// A move to an arbitrary named mailbox (IMAP folders; Gmail labels, E8.6).
-    Move { mailbox: String },
+    Move {
+        mailbox: String,
+    },
 }
 
 impl TriageAction {
@@ -107,7 +109,9 @@ mod tests {
     #[test]
     fn payload_round_trips() {
         let payload = TriagePayload {
-            action: TriageAction::Move { mailbox: "Work".into() },
+            action: TriageAction::Move {
+                mailbox: "Work".into(),
+            },
             previous_mailbox: Some("Inbox".into()),
             previous_unread: false,
             previous_flagged: true,

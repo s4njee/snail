@@ -9,7 +9,17 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 
 /// `(name, sql)`, applied in order; index + 1 is the version it produces.
-pub const MIGRATIONS: &[(&str, &str)] = &[("v1", V1), ("v2", V2), ("v3", V3), ("v4", V4)];
+pub const MIGRATIONS: &[(&str, &str)] = &[
+    ("v1", V1),
+    ("v2", V2),
+    ("v3", V3),
+    ("v4", V4),
+    ("v5", V5),
+    ("v6", V6),
+    ("v7", V7),
+    ("v8", V8),
+    ("v9", V9),
+];
 
 /// The version a fresh store ends at.
 pub fn latest_version() -> u32 {
@@ -300,6 +310,74 @@ END;
 INSERT INTO message_fts (message_fts) VALUES ('rebuild');
 "#;
 
+/// v5 adds the provider-neutral calendar sync state required by E11. Server canonical bytes are
+/// distinct from optimistic local serialization so CalDAV normalization and 412 conflicts cannot
+/// silently clobber one side.
+const V5: &str = r#"
+ALTER TABLE calendar ADD COLUMN href TEXT;
+ALTER TABLE calendar ADD COLUMN access_role TEXT;
+ALTER TABLE calendar ADD COLUMN subscribed INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE calendar ADD COLUMN ctag TEXT;
+ALTER TABLE calendar ADD COLUMN supports_sync_collection INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE event ADD COLUMN raw_ical TEXT;
+ALTER TABLE event ADD COLUMN server_ical TEXT;
+ALTER TABLE event ADD COLUMN conflict_json TEXT;
+
+CREATE INDEX IF NOT EXISTS event_by_ical_uid ON event (ical_uid);
+CREATE UNIQUE INDEX IF NOT EXISTS event_by_instance_identity
+ON event (calendar_id, recurring_event_id, original_start)
+WHERE recurring_event_id IS NOT NULL AND original_start IS NOT NULL;
+"#;
+
+/// v6 separates provider `selected` metadata from Snail's immediate per-calendar visibility toggle.
+const V6: &str = r#"
+ALTER TABLE calendar ADD COLUMN visible INTEGER NOT NULL DEFAULT 1;
+CREATE INDEX IF NOT EXISTS event_by_calendar_range
+ON event (calendar_id, start_utc, end_utc);
+"#;
+
+/// v7 makes the event editor's reminders, attendees, recurrence exceptions and local tasks durable.
+/// Reminder delivery is normalized separately so a recurring event may fire once per occurrence
+/// without the scheduler ever needing to mutate the reminder definition itself.
+const V7: &str = r#"
+ALTER TABLE reminder ADD COLUMN same_day_minute INTEGER;
+
+CREATE TABLE IF NOT EXISTS reminder_delivery (
+    reminder_id      INTEGER NOT NULL REFERENCES reminder(id) ON DELETE CASCADE,
+    occurrence_start INTEGER NOT NULL,
+    due_utc          INTEGER NOT NULL,
+    fired_at         INTEGER,
+    PRIMARY KEY (reminder_id, occurrence_start)
+);
+CREATE INDEX IF NOT EXISTS reminder_delivery_due
+ON reminder_delivery (fired_at, due_utc);
+
+CREATE TABLE IF NOT EXISTS attendee (
+    id           INTEGER PRIMARY KEY,
+    event_id     INTEGER NOT NULL REFERENCES event(id) ON DELETE CASCADE,
+    email        TEXT    NOT NULL,
+    display_name TEXT,
+    role         TEXT    NOT NULL DEFAULT 'required',
+    status       TEXT    NOT NULL DEFAULT 'needs-action',
+    is_self      INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (event_id, email)
+);
+
+CREATE INDEX IF NOT EXISTS task_by_due ON task (due_utc, done);
+"#;
+
+/// v8 persists the RFC 6638 capability probe used to gate CalDAV RSVP writes.
+const V8: &str = r#"
+ALTER TABLE calendar ADD COLUMN supports_scheduling INTEGER NOT NULL DEFAULT 0;
+"#;
+
+/// v9 persists the per-mailbox choices made before an account's first full pull and later from
+/// Settings → Accounts.
+const V9: &str = r#"
+ALTER TABLE mailbox ADD COLUMN sync_enabled INTEGER NOT NULL DEFAULT 1;
+"#;
+
 /// The schema version currently recorded, or 0 for an empty store.
 pub fn version(conn: &Connection) -> Result<u32> {
     use rusqlite::OptionalExtension as _;
@@ -489,6 +567,33 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(hits, 1, "the rebuild indexed a row that predates the migration");
+        assert_eq!(
+            hits, 1,
+            "the rebuild indexed a row that predates the migration"
+        );
+    }
+
+    #[test]
+    fn mailbox_sync_selection_defaults_on_for_existing_rows() {
+        let mut conn = memory();
+        migrate(&mut conn, Some(8)).unwrap();
+        conn.execute(
+            "INSERT INTO account (id, kind, address, created_at) VALUES (1, 'gmail', 'a@b.c', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO mailbox (id, account_id, name, kind) VALUES (1, 1, 'Inbox', 'inbox')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&mut conn, Some(9)).unwrap();
+        let enabled: i64 = conn
+            .query_row("SELECT sync_enabled FROM mailbox WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(enabled, 1);
     }
 }

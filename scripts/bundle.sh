@@ -9,7 +9,30 @@
 # Ad-hoc signing is enough for personal use (no notarization). If that ever stops being true, the
 # change is: a Developer ID certificate, `codesign --options runtime` with entitlements, then
 # `xcrun notarytool submit` and `xcrun stapler staple`.
+#
+# The bundle is also what makes new-mail notifications work (plan.md E16.8): macOS delivers them
+# only to an app with a bundle id, so under `cargo run` they are dropped. The Dock badge works
+# either way. Launch with `--test-notification` to check delivery (the first one asks permission).
+#
+# Usage: scripts/bundle.sh [--install]
+#   --install   also quit any running Snail, replace /Applications/Snail.app with this build, and
+#               re-register it with Launch Services so the Dock and Notification Center use it.
 set -euo pipefail
+
+INSTALL=0
+for arg in "$@"; do
+    case "$arg" in
+        --install) INSTALL=1 ;;
+        -h | --help)
+            sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *)
+            echo "unknown option: $arg (try --help)" >&2
+            exit 1
+            ;;
+    esac
+done
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="Snail"
@@ -119,4 +142,29 @@ codesign --verify --verbose=2 "$APP"
 
 echo
 echo "bundled: $APP"
-echo "run it with: open \"$APP\""
+
+if [[ "$INSTALL" == 1 ]]; then
+    INSTALLED="/Applications/$APP_NAME.app"
+    if pgrep -f "$INSTALLED/Contents/MacOS/$EXECUTABLE" >/dev/null 2>&1; then
+        echo "==> quitting the running $APP_NAME"
+        osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || true
+        for _ in $(seq 1 50); do
+            pgrep -f "$INSTALLED/Contents/MacOS/$EXECUTABLE" >/dev/null 2>&1 || break
+            sleep 0.1
+        done
+        if pgrep -f "$INSTALLED/Contents/MacOS/$EXECUTABLE" >/dev/null 2>&1; then
+            echo "$APP_NAME did not quit; quit it and run again" >&2
+            exit 1
+        fi
+    fi
+    echo "==> installing to $INSTALLED"
+    rm -rf "$INSTALLED"
+    ditto "$APP" "$INSTALLED"
+    # So the Dock, Spotlight and Notification Center pick up this build rather than a cached one.
+    LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+    [[ -x "$LSREGISTER" ]] && "$LSREGISTER" -f "$INSTALLED"
+    echo "installed: $INSTALLED"
+    echo "run it with: open \"$INSTALLED\""
+else
+    echo "run it with: open \"$APP\"  (or re-run with --install to replace /Applications/$APP_NAME.app)"
+fi

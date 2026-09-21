@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
@@ -29,6 +30,10 @@ pub const GOOGLE_SCOPES: &[&str] = &[
 
 pub const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 pub const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+pub const GOOGLE_REVOKE_URL: &str = "https://oauth2.googleapis.com/revoke";
+
+/// How long the loopback listener waits for the browser before giving up.
+pub const LOOPBACK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 // --- Errors (E3.6) --------------------------------------------------------------------------
 
@@ -55,6 +60,8 @@ pub enum AuthError {
     ClockSkew,
     /// No OS keychain is available (E3.8).
     KeychainUnavailable(String),
+    /// The user stopped a sign-in that was waiting on the browser.
+    Cancelled,
     Other(String),
 }
 
@@ -93,6 +100,7 @@ impl AuthError {
                     .into(),
             AuthError::KeychainUnavailable(inner) =>
                 format!("No OS keychain is available ({inner})."),
+            AuthError::Cancelled => "Sign-in was cancelled.".into(),
             AuthError::Other(inner) => inner.clone(),
         }
     }
@@ -183,6 +191,76 @@ impl GoogleOAuth {
         }
     }
 
+    /// Read the JSON Google Cloud Console downloads for an OAuth client ("Download JSON"). Only a
+    /// **Desktop app** client works with the loopback flow, so a Web client is refused by name
+    /// rather than failing later with `redirect_uri_mismatch`. A flat
+    /// `{"client_id", "client_secret"}` object is accepted too.
+    pub fn from_client_json(json: &str) -> Result<Self> {
+        let value: serde_json::Value =
+            serde_json::from_str(json).context("that file is not JSON")?;
+        if value.get("web").is_some() {
+            bail!(AuthError::Other(
+                "That is a Web application client. Snail needs a Desktop app client: in Google \
+                 Cloud Console create an OAuth client ID of type \"Desktop app\" and download \
+                 its JSON."
+                    .into()
+            ));
+        }
+        let section = value.get("installed").unwrap_or(&value);
+        let field = |name: &str| {
+            section
+                .get(name)
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+        };
+        match (field("client_id"), field("client_secret")) {
+            (Some(id), Some(secret)) => Self::checked(&id, &secret),
+            _ => bail!(AuthError::Other(
+                "That file has no client_id and client_secret. Download the JSON of a Desktop app \
+                 OAuth client from Google Cloud Console → APIs & Services → Credentials."
+                    .into()
+            )),
+        }
+    }
+
+    /// Validate a pasted client id and secret. The id's shape is fixed by Google, so a paste of
+    /// the wrong field is caught here instead of at the consent screen.
+    pub fn checked(client_id: &str, client_secret: &str) -> Result<Self> {
+        let client_id = client_id.trim();
+        let client_secret = client_secret.trim();
+        if !client_id.ends_with(".apps.googleusercontent.com") {
+            bail!(AuthError::Other(
+                "A Google client ID ends in .apps.googleusercontent.com — check you pasted the \
+                 Client ID, not the project ID or the secret."
+                    .into()
+            ));
+        }
+        if client_secret.is_empty() {
+            bail!(AuthError::Other("The client secret is empty.".into()));
+        }
+        Ok(Self::new(client_id, client_secret))
+    }
+
+    /// A client from `SNAIL_GOOGLE_CLIENT_ID` / `SNAIL_GOOGLE_CLIENT_SECRET`, read at run time or,
+    /// failing that, baked in at build time (E3.1: injected, never committed).
+    pub fn from_env() -> Option<Self> {
+        let runtime = std::env::var("SNAIL_GOOGLE_CLIENT_ID")
+            .ok()
+            .zip(std::env::var("SNAIL_GOOGLE_CLIENT_SECRET").ok());
+        let built = option_env!("SNAIL_GOOGLE_CLIENT_ID")
+            .zip(option_env!("SNAIL_GOOGLE_CLIENT_SECRET"))
+            .map(|(id, secret)| (id.to_string(), secret.to_string()));
+        let (id, secret) = runtime.or(built)?;
+        Self::checked(&id, &secret).ok()
+    }
+
+    fn to_json(&self) -> String {
+        serde_json::json!({ "client_id": self.client_id, "client_secret": self.client_secret })
+            .to_string()
+    }
+
     /// The consent URL. `code_challenge_method=S256` is explicit: Google silently defaults to
     /// `plain` when a challenge is sent without it (E3.1).
     pub fn authorize_url(&self, redirect_uri: &str, state: &str, code_challenge: &str) -> String {
@@ -200,7 +278,18 @@ impl GoogleOAuth {
     /// Run the loopback flow: bind a random `127.0.0.1` port, open the system browser, catch the
     /// redirect, and exchange the code.
     pub fn authorize_loopback(&self) -> Result<Tokens> {
+        self.authorize_loopback_until(&AtomicBool::new(false), LOOPBACK_TIMEOUT)
+    }
+
+    /// [`Self::authorize_loopback`], giving up when `cancel` is set or `timeout` passes — the user
+    /// may close the browser tab, and nothing else would ever end the wait.
+    pub fn authorize_loopback_until(
+        &self,
+        cancel: &AtomicBool,
+        timeout: Duration,
+    ) -> Result<Tokens> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).context("bind loopback redirect")?;
+        listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
         let redirect_uri = format!("http://127.0.0.1:{port}/oauth2callback");
 
@@ -211,34 +300,64 @@ impl GoogleOAuth {
         let url = self.authorize_url(&redirect_uri, &state, &challenge);
         open_in_browser(&url)?;
 
-        let (mut stream, _) = listener.accept().context("wait for the redirect")?;
-        let mut buffer = [0u8; 8192];
-        let read = stream.read(&mut buffer)?;
-        let request = String::from_utf8_lossy(&buffer[..read]).to_string();
-        let target = request
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .ok_or_else(|| anyhow!("malformed redirect"))?;
-        let params = parse_query(target.split_once('?').map(|(_, q)| q).unwrap_or(""));
-
-        let body = b"<html><body style=\"font-family:sans-serif;padding:3rem\">\
-            <h2>Snail is connected.</h2><p>You can close this tab.</p></body></html>";
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        );
-        let _ = stream.write_all(response.as_bytes());
-        let _ = stream.write_all(body);
-        let _ = stream.flush();
+        let deadline = Instant::now() + timeout;
+        let params = loop {
+            if cancel.load(Ordering::Relaxed) {
+                bail!(AuthError::Cancelled);
+            }
+            if Instant::now() >= deadline {
+                bail!(AuthError::Other(
+                    "Timed out waiting for Google. Start sign-in again when you are ready.".into()
+                ));
+            }
+            let mut stream = match listener.accept() {
+                Ok((stream, _)) => stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+                Err(error) => return Err(error).context("wait for the redirect"),
+            };
+            stream.set_nonblocking(false)?;
+            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+            let mut buffer = [0u8; 8192];
+            let read = stream.read(&mut buffer).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+            let target = request
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or("");
+            let (path, query) = target.split_once('?').unwrap_or((target, ""));
+            let params = parse_query(query);
+            // Browsers also ask for /favicon.ico, and a stray request must not end the flow; only
+            // the redirect carrying our state counts.
+            if path != "/oauth2callback" || params.get("state") != Some(&state) {
+                respond(&mut stream, "404 Not Found", "");
+                continue;
+            }
+            let page = if params.contains_key("error") {
+                "<h2>Sign-in was not completed.</h2><p>Return to Snail to try again.</p>"
+            } else {
+                "<h2>Snail is connected.</h2><p>You can close this tab.</p>"
+            };
+            respond(&mut stream, "200 OK", page);
+            break params;
+        };
 
         if let Some(error) = params.get("error") {
-            return Err(AuthError::from_google(error, params.get("error_description").map(String::as_str).unwrap_or("")).into());
+            return Err(AuthError::from_google(
+                error,
+                params
+                    .get("error_description")
+                    .map(String::as_str)
+                    .unwrap_or(""),
+            )
+            .into());
         }
-        if params.get("state").map(String::as_str) != Some(state.as_str()) {
-            bail!("state mismatch — refusing the authorization code");
-        }
-        let code = params.get("code").ok_or_else(|| anyhow!("no code in redirect"))?;
+        let code = params
+            .get("code")
+            .ok_or_else(|| anyhow!("no code in redirect"))?;
         self.exchange(code, &redirect_uri, &verifier)
     }
 
@@ -282,7 +401,10 @@ fn parse_token_response(response: reqwest::blocking::Response) -> Result<Tokens>
     let value: serde_json::Value = serde_json::from_str(&text)
         .with_context(|| format!("token endpoint returned non-JSON ({status})"))?;
     if !status.is_success() {
-        let code = value.get("error").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let code = value
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
         let description = value
             .get("error_description")
             .and_then(|v| v.as_str())
@@ -290,12 +412,48 @@ fn parse_token_response(response: reqwest::blocking::Response) -> Result<Tokens>
         return Err(AuthError::from_google(code, description).into());
     }
     Ok(Tokens {
-        access_token: value.get("access_token").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        refresh_token: value.get("refresh_token").and_then(|v| v.as_str()).map(str::to_string),
-        expires_at: now_epoch() + value.get("expires_in").and_then(|v| v.as_u64()).unwrap_or(3600),
-        scope: value.get("scope").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        token_type: value.get("token_type").and_then(|v| v.as_str()).unwrap_or("Bearer").to_string(),
+        access_token: value
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        refresh_token: value
+            .get("refresh_token")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        expires_at: now_epoch()
+            + value
+                .get("expires_in")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(3600),
+        scope: value
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        token_type: value
+            .get("token_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Bearer")
+            .to_string(),
     })
+}
+
+/// Revoke a Google refresh token before removing its local account. A 400 means the token is
+/// already invalid and therefore already revoked for our purposes.
+pub fn revoke_google_token(token: &str) -> Result<()> {
+    let response = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?
+        .post(GOOGLE_REVOKE_URL)
+        .form(&[("token", token)])
+        .send()
+        .context("contact Google token revocation")?;
+    if response.status().is_success() || response.status() == reqwest::StatusCode::BAD_REQUEST {
+        Ok(())
+    } else {
+        bail!("Google token revocation failed ({})", response.status())
+    }
 }
 
 pub fn pkce_verifier() -> String {
@@ -355,7 +513,23 @@ fn percent_decode(input: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
-fn open_in_browser(url: &str) -> Result<()> {
+fn respond(stream: &mut std::net::TcpStream, status: &str, page: &str) {
+    let body = if page.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<html><body style=\"font-family:-apple-system,sans-serif;padding:3rem\">{page}</body></html>"
+        )
+    };
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.flush();
+}
+
+pub fn open_in_browser(url: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     let mut command = std::process::Command::new("open");
     #[cfg(target_os = "windows")]
@@ -366,7 +540,10 @@ fn open_in_browser(url: &str) -> Result<()> {
     };
     #[cfg(all(unix, not(target_os = "macos")))]
     let mut command = std::process::Command::new("xdg-open");
-    command.arg(url).spawn().context("open the system browser")?;
+    command
+        .arg(url)
+        .spawn()
+        .context("open the system browser")?;
     Ok(())
 }
 
@@ -397,13 +574,37 @@ pub fn imap_usernames_to_try(full_address: &str) -> Vec<String> {
 
 /// Accounts plus their secrets. Secrets live in the `SecretStore`, never the database (E2.8).
 pub struct AccountStore {
-    store: snail_core::store::Store,
+    store: Arc<snail_core::store::Store>,
     secrets: Arc<dyn SecretStore>,
 }
 
 impl AccountStore {
-    pub fn new(store: snail_core::store::Store, secrets: Arc<dyn SecretStore>) -> Self {
-        Self { store, secrets }
+    pub fn new(
+        store: impl Into<Arc<snail_core::store::Store>>,
+        secrets: Arc<dyn SecretStore>,
+    ) -> Self {
+        Self {
+            store: store.into(),
+            secrets,
+        }
+    }
+
+    /// The keychain entry holding the Google OAuth client, as `{"client_id", "client_secret"}`.
+    pub const GOOGLE_CLIENT_KEY: &str = "google:oauth-client";
+
+    pub fn set_google_client(&self, client: &GoogleOAuth) -> Result<()> {
+        self.secrets.set(Self::GOOGLE_CLIENT_KEY, &client.to_json())
+    }
+
+    /// The OAuth client to sign in with: the one saved during onboarding, else the environment.
+    pub fn google_client(&self) -> Result<Option<GoogleOAuth>> {
+        if let Some(json) = self.secrets.get(Self::GOOGLE_CLIENT_KEY)? {
+            if let Ok(client) = GoogleOAuth::from_client_json(&json) {
+                return Ok(Some(client));
+            }
+            log::warn!("the saved Google OAuth client is unreadable; ignoring it");
+        }
+        Ok(GoogleOAuth::from_env())
     }
 
     pub fn store(&self) -> &snail_core::store::Store {
@@ -423,8 +624,7 @@ impl AccountStore {
     }
 
     pub fn set_google_refresh_token(&self, address: &str, token: &str) -> Result<()> {
-        self.secrets
-            .set(&Self::google_refresh_key(address), token)
+        self.secrets.set(&Self::google_refresh_key(address), token)
     }
 
     pub fn google_refresh_token(&self, address: &str) -> Result<Option<String>> {
@@ -449,6 +649,19 @@ impl AccountStore {
         }
     }
 
+    /// Revoke what the provider supports, wipe the keychain item, then cascade the local rows and
+    /// their unshared cache objects. A network failure aborts before local deletion so revocation
+    /// can be retried instead of silently leaving an active Google grant behind.
+    pub fn remove_account(&self, kind: &str, address: &str, account_id: i64) -> Result<()> {
+        if matches!(kind, "gmail" | "google")
+            && let Some(token) = self.google_refresh_token(address)?
+        {
+            revoke_google_token(&token)?;
+        }
+        self.forget(kind, address)?;
+        self.store.delete_account(account_id)
+    }
+
     /// Register an account and its default identity in one step (E3.4c, E3.7).
     pub fn add_account(
         &self,
@@ -460,14 +673,17 @@ impl AccountStore {
         if let Some(existing) = self.store.account_by_address(kind, address)? {
             return Ok(existing.id);
         }
-        let id = self.store.insert_account(kind, address, display_name, now)?;
-        self.store.insert_identity(&snail_core::store::NewIdentity {
-            account_id: id,
-            address: address.to_string(),
-            display_name: display_name.map(str::to_string),
-            signature: None,
-            is_default: true,
-        })?;
+        let id = self
+            .store
+            .insert_account(kind, address, display_name, now)?;
+        self.store
+            .insert_identity(&snail_core::store::NewIdentity {
+                account_id: id,
+                address: address.to_string(),
+                display_name: display_name.map(str::to_string),
+                signature: None,
+                is_default: true,
+            })?;
         Ok(id)
     }
 }
@@ -482,7 +698,11 @@ mod tests {
         let oauth = GoogleOAuth::new("client-123", "secret");
         let verifier = pkce_verifier();
         let challenge = pkce_challenge(&verifier);
-        let url = oauth.authorize_url("http://127.0.0.1:4444/oauth2callback", "state-xyz", &challenge);
+        let url = oauth.authorize_url(
+            "http://127.0.0.1:4444/oauth2callback",
+            "state-xyz",
+            &challenge,
+        );
         assert!(url.contains("code_challenge_method=S256"), "{url}");
         assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A4444"));
         assert!(url.contains("access_type=offline"));
@@ -490,6 +710,53 @@ mod tests {
         // The challenge is the SHA-256 of the verifier, not the verifier itself.
         assert!(url.contains(&challenge));
         assert!(!url.contains(&verifier));
+    }
+
+    #[test]
+    fn a_downloaded_desktop_client_json_is_read() {
+        let client = GoogleOAuth::from_client_json(
+            r#"{"installed":{"client_id":"123-abc.apps.googleusercontent.com","project_id":"snail",
+               "client_secret":"GOCSPX-xyz","redirect_uris":["http://localhost"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(client.client_id, "123-abc.apps.googleusercontent.com");
+        assert_eq!(client.client_secret, "GOCSPX-xyz");
+        // What the keychain holds round-trips.
+        let again = GoogleOAuth::from_client_json(&client.to_json()).unwrap();
+        assert_eq!(again.client_id, client.client_id);
+    }
+
+    #[test]
+    fn a_web_client_or_a_wrong_paste_is_refused_with_a_reason() {
+        let web = GoogleOAuth::from_client_json(
+            r#"{"web":{"client_id":"1.apps.googleusercontent.com","client_secret":"s"}}"#,
+        )
+        .unwrap_err();
+        assert!(web.to_string().contains("Desktop app"), "{web}");
+        assert!(GoogleOAuth::from_client_json("not json").is_err());
+        assert!(GoogleOAuth::from_client_json(r#"{"installed":{}}"#).is_err());
+        let pasted = GoogleOAuth::checked("my-project-123", "secret").unwrap_err();
+        assert!(pasted.to_string().contains("apps.googleusercontent.com"));
+        assert!(GoogleOAuth::checked(" 1.apps.googleusercontent.com ", " s ").is_ok());
+    }
+
+    #[test]
+    fn the_saved_client_is_preferred_and_lives_in_the_keychain() {
+        let store = snail_core::store::Store::open_in_memory().unwrap();
+        let secrets = Arc::new(MemoryStore::new());
+        let accounts = AccountStore::new(store, secrets.clone());
+        let client = GoogleOAuth::checked("9.apps.googleusercontent.com", "s").unwrap();
+        accounts.set_google_client(&client).unwrap();
+        assert_eq!(
+            accounts.google_client().unwrap().unwrap().client_id,
+            client.client_id
+        );
+        assert!(
+            secrets
+                .get(AccountStore::GOOGLE_CLIENT_KEY)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -547,7 +814,10 @@ mod tests {
     #[test]
     fn the_imap_username_is_the_name_part_but_smtp_is_the_full_address() {
         assert_eq!(imap_username("johnappleseed@icloud.com"), "johnappleseed");
-        assert_eq!(smtp_username("johnappleseed@icloud.com"), "johnappleseed@icloud.com");
+        assert_eq!(
+            smtp_username("johnappleseed@icloud.com"),
+            "johnappleseed@icloud.com"
+        );
         assert_eq!(
             imap_usernames_to_try("johnappleseed@icloud.com"),
             vec!["johnappleseed@icloud.com", "johnappleseed"]
@@ -566,7 +836,9 @@ mod tests {
         assert!(id > 0);
         // Adding twice is idempotent.
         assert_eq!(
-            accounts.add_account("icloud", "me@icloud.com", None, 0).unwrap(),
+            accounts
+                .add_account("icloud", "me@icloud.com", None, 0)
+                .unwrap(),
             id
         );
 
@@ -574,10 +846,49 @@ mod tests {
             .set_icloud_app_password("me@icloud.com", "abcd-efgh-ijkl-mnop")
             .unwrap();
         assert_eq!(
-            accounts.icloud_app_password("me@icloud.com").unwrap().as_deref(),
+            accounts
+                .icloud_app_password("me@icloud.com")
+                .unwrap()
+                .as_deref(),
             Some("abcd-efgh-ijkl-mnop")
         );
         accounts.forget("icloud", "me@icloud.com").unwrap();
         assert_eq!(accounts.icloud_app_password("me@icloud.com").unwrap(), None);
+    }
+
+    #[test]
+    fn removing_icloud_wipes_the_secret_and_cascades_local_rows() {
+        let store = Arc::new(snail_core::store::Store::open_in_memory().unwrap());
+        let secrets = Arc::new(MemoryStore::new());
+        let accounts = AccountStore::new(store.clone(), secrets);
+        let id = accounts
+            .add_account("icloud", "remove@icloud.com", Some("Remove Me"), 0)
+            .unwrap();
+        accounts
+            .set_icloud_app_password("remove@icloud.com", "abcd-efgh-ijkl-mnop")
+            .unwrap();
+        store.ensure_mailbox(id, "Inbox", "inbox").unwrap();
+
+        accounts
+            .remove_account("icloud", "remove@icloud.com", id)
+            .unwrap();
+
+        assert!(
+            store
+                .account_by_address("icloud", "remove@icloud.com")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            accounts.icloud_app_password("remove@icloud.com").unwrap(),
+            None
+        );
+        assert!(
+            store
+                .mailboxes()
+                .unwrap()
+                .into_iter()
+                .all(|mailbox| mailbox.account_id != id)
+        );
     }
 }

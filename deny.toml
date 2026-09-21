@@ -1,0 +1,14 @@
+# E10.9: keep this list synchronized with the exactly pinned rpgp release on every upgrade.
+[advisories]
+# The pinned GPUI stack currently has several unmaintained transitive rendering dependencies.
+# Continue to fail for direct workspace dependencies; track upstream replacements separately.
+unmaintained = "workspace"
+ignore = [
+    # rsa 0.9's Marvin timing attack. rpgp has no fixed compatible rsa release yet; Snail tracks
+    # the upstream fix and treats key material as local, but this remains a consciously accepted
+    # exception rather than a silent suppression.
+    "RUSTSEC-2023-0071",
+    # rustls-pemfile is unmaintained through a transitive RustCrypto edge in pgp 0.20.0. It is not
+    # used by Snail's OpenPGP parsing path; remove this when rpgp updates the dependency family.
+    "RUSTSEC-2025-0144",
+]

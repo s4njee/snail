@@ -211,7 +211,10 @@ mod tests {
         a.server_thread = Some("gmail-thread-9".into());
         b.server_thread = Some("gmail-thread-9".into());
         let threads = assign_threads(&[a, b]);
-        assert_eq!(threads[&1], threads[&2], "server id must not disagree with us");
+        assert_eq!(
+            threads[&1], threads[&2],
+            "server id must not disagree with us"
+        );
     }
 
     #[test]

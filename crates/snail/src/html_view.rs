@@ -93,12 +93,43 @@ pub fn decode_to_bgra(bytes: &[u8]) -> Option<(f32, f32, Vec<u8>)> {
     Some((width as f32, height as f32, rgba.into_raw()))
 }
 
-/// Build a gpui image from BGRA bytes.
+/// Build a gpui image from BGRA bytes, with a one-pixel [`EDGE_PAD`] around it.
+///
+/// GPUI samples images from a shared atlas with linear filtering and no gutter between tiles, so
+/// an image drawn larger than its pixels blends its outermost row and column with whatever tile
+/// sits next to it — thin grey or black lines along image edges that Apple Mail does not have.
+/// Padding each image with a copy of its own edge moves that blend into the pad, which the
+/// painter clips away.
 pub fn render_image(width: f32, height: f32, bgra: Vec<u8>) -> Arc<RenderImage> {
-    let buffer =
-        image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(width as u32, height as u32, bgra)
-            .expect("BGRA buffer matches its dimensions");
+    let (padded_width, padded_height) = (width as u32 + 2 * EDGE_PAD, height as u32 + 2 * EDGE_PAD);
+    let padded = pad_edges(width as u32, height as u32, &bgra);
+    let buffer = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(
+        padded_width,
+        padded_height,
+        padded,
+    )
+    .expect("padded buffer matches its dimensions");
     Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]))
+}
+
+/// Texels of replicated edge around every image texture; see [`render_image`].
+pub const EDGE_PAD: u32 = 1;
+
+/// Surround a `width` × `height` 4-byte-per-pixel image with [`EDGE_PAD`] copies of its edge
+/// pixels (clamp-to-edge, done by hand because the atlas cannot).
+pub fn pad_edges(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
+    let (width, height, pad) = (width as usize, height as usize, EDGE_PAD as usize);
+    let padded_width = width + 2 * pad;
+    let mut out = Vec::with_capacity(padded_width * (height + 2 * pad) * 4);
+    for row in 0..height + 2 * pad {
+        let source_row = row.saturating_sub(pad).min(height.saturating_sub(1));
+        for column in 0..padded_width {
+            let source_column = column.saturating_sub(pad).min(width.saturating_sub(1));
+            let at = (source_row * width + source_column) * 4;
+            out.extend_from_slice(&pixels[at..at + 4]);
+        }
+    }
+    out
 }
 
 fn decode(bytes: &[u8]) -> Option<Placed> {
@@ -139,7 +170,7 @@ pub fn layout_document(
     show_quotes: bool,
     cx: &mut App,
 ) -> Result<HtmlView, layout::LayoutError> {
-    let mut dom = parse_to_dom(document, images, show_quotes);
+    let mut dom = parse_to_dom_at(document, images, show_quotes, width);
     resolve_font_families(&mut dom, window.text_system());
     let measure = GpuiMeasure {
         text_system: window.text_system(),
@@ -251,7 +282,7 @@ pub fn paint(
         // Email is authored for white paper; give the document its own ground so a dark app theme
         // does not turn every message black.
         .bg(rgb(0xffffff))
-        .text_color(rgb(0x241f1b))
+        .text_color(rgb(0x202020))
         .children(
             view.fragments
                 .iter()
@@ -294,7 +325,12 @@ fn paint_fragment(
             .bg(rgba(to_u32(*color)))
             .rounded(px(*radius))
             .into_any_element(),
-        Fragment::Border { rect, color, width } => div()
+        Fragment::Border {
+            rect,
+            color,
+            width,
+            radius,
+        } => div()
             .absolute()
             .left(px(rect.x))
             .top(px(rect.y))
@@ -302,6 +338,7 @@ fn paint_fragment(
             .h(px(rect.h))
             .border(px((*width).max(0.75)))
             .border_color(rgba(to_u32(*color)))
+            .rounded(px(*radius))
             .into_any_element(),
         Fragment::Word {
             x,
@@ -310,8 +347,14 @@ fn paint_fragment(
             font,
             color,
             underline,
+            strike,
             href,
         } => {
+            // Paint each word in a box exactly its CSS line height tall, so GPUI centres the
+            // glyphs where layout put the line. Without it GPUI used its own default line height
+            // (about 1.6×), which drew every line of email text lower than laid out and left a
+            // `line-height: 50px` button's label at the top instead of in the middle.
+            let line = layout::line_height(font);
             let selectable = gpui_kit::base::SelectableText::with_handle(
                 format!("html-word-{index}"),
                 selection.clone(),
@@ -339,13 +382,12 @@ fn paint_fragment(
                     .text_size(px(font.size))
                     .text_color(rgba(to_u32(*color)))
                     .font_weight(weight)
+                    .line_height(px(line))
                     .when(*underline, |this| this.underline())
+                    .when(*strike, |this| this.line_through())
                     .when(font.italic, |this| this.italic())
                     .href(target.clone())
-                    .tooltip(move |window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(tooltip.clone())
-                            .build(window, cx)
-                    })
+                    .tooltip(move |window, cx| link_tooltip(&tooltip, window, cx))
                     .open_with(move |href, _, window, cx| {
                         open_link(visible.clone(), href.to_string(), window, cx)
                     })
@@ -360,50 +402,107 @@ fn paint_fragment(
                     .text_size(px(font.size))
                     .text_color(rgba(to_u32(*color)))
                     .font_weight(weight)
+                    .line_height(px(line))
                     .when(*underline, |this| this.underline())
+                    .when(*strike, |this| this.line_through())
                     .when(font.italic, |this| this.italic())
                     .child(selectable)
                     .into_any_element()
             }
         }
-        Fragment::Image { rect, src } => match images.resolve(src) {
-            // A real inline image (E6.8).
-            // `Fill` is HTML's default `object-fit`. GPUI's own default is `Contain`, which
-            // shrank the picture to fit inside any box whose aspect ratio differed.
-            Some(placed) => img(ImageSource::Render(placed.render.clone()))
-                .object_fit(ObjectFit::Fill)
-                .absolute()
-                .left(px(rect.x))
-                .top(px(rect.y))
-                .w(px(rect.w))
-                .h(px(rect.h))
-                .into_any_element(),
-            // A blocked remote image or a missing part: reserved size, no fetch (E6.2).
-            None => div()
-                .absolute()
-                .left(px(rect.x))
-                .top(px(rect.y))
-                .w(px(rect.w))
-                .h(px(rect.h))
-                .bg(rgb(0xf2efe9))
-                .border_1()
-                .border_color(rgb(0xd9d4cc))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(11.0))
-                .text_color(rgb(0x8a837b))
-                .when(rect.w >= 120.0 && rect.h >= 48.0, |this| {
-                    this.child(if src.is_empty() {
-                        "[image]"
-                    } else {
-                        "[remote image blocked]"
+        Fragment::Image {
+            rect,
+            src,
+            href,
+            background,
+        } => {
+            // A CSS background that cannot be shown leaves its box as it is, as in a browser. A
+            // placeholder here drew only its 1px frame, because the box's own content covers the
+            // rest — thin grey lines along table cells that Apple Mail does not have.
+            if *background && images.resolve(src).is_none() {
+                return div().into_any_element();
+            }
+            // The box is placed in document space; the picture fills it.
+            let picture = match images.resolve(src) {
+                // A real inline image (E6.8).
+                // `Fill` is HTML's default `object-fit`. GPUI's own default is `Contain`, which
+                // shrank the picture to fit inside any box whose aspect ratio differed.
+                // The texture carries an EDGE_PAD border; draw it that much larger and let the
+                // frame clip it, so the filtered edge lands outside the box.
+                Some(placed) => {
+                    let pad_x = rect.w / placed.width.max(1.0) * EDGE_PAD as f32;
+                    let pad_y = rect.h / placed.height.max(1.0) * EDGE_PAD as f32;
+                    img(ImageSource::Render(placed.render.clone()))
+                        .object_fit(ObjectFit::Fill)
+                        .absolute()
+                        .left(px(-pad_x))
+                        .top(px(-pad_y))
+                        .w(px(rect.w + 2.0 * pad_x))
+                        .h(px(rect.h + 2.0 * pad_y))
+                        .into_any_element()
+                }
+                // A blocked remote image or a missing part: reserved size, no fetch (E6.2).
+                None => div()
+                    .size_full()
+                    .bg(rgb(0xefefef))
+                    .border_1()
+                    .border_color(rgb(0xd5d5d5))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(11.0))
+                    .text_color(rgb(0x848484))
+                    .when(rect.w >= 120.0 && rect.h >= 48.0, |this| {
+                        this.child(if src.is_empty() {
+                            "[image]"
+                        } else {
+                            "[remote image blocked]"
+                        })
                     })
-                })
-                .into_any_element(),
-        },
+                    .into_any_element(),
+            };
+            let frame = div()
+                .id(format!("html-image-{index}"))
+                .absolute()
+                .left(px(rect.x))
+                .top(px(rect.y))
+                .w(px(rect.w))
+                .h(px(rect.h))
+                .overflow_hidden()
+                .child(picture);
+            match href {
+                // A linked image (an email's buttons, logos and banners): the whole box is the
+                // link, with its target on hover, like Apple Mail.
+                Some(target) => {
+                    let tooltip = target.clone();
+                    let target = target.clone();
+                    frame
+                        .cursor_pointer()
+                        .tooltip(move |window, cx| link_tooltip(&tooltip, window, cx))
+                        .on_click(move |_, window, cx| {
+                            // No visible text to disagree with the target, so nothing to confirm.
+                            open_link(String::new(), target.clone(), window, cx)
+                        })
+                        .into_any_element()
+                }
+                None => frame.into_any_element(),
+            }
+        }
     }
 }
+
+/// A link's target on hover, wrapped at a readable width. Tracking links run to hundreds of
+/// characters with no spaces; on one line they ran off the window.
+fn link_tooltip(target: &str, window: &mut Window, cx: &mut App) -> AnyView {
+    let target = SharedString::from(target.to_string());
+    gpui_kit::component::tooltip::Tooltip::element(move |_, _| {
+        div().max_w(px(LINK_TOOLTIP_WIDTH)).child(target.clone())
+    })
+    .build(window, cx)
+}
+
+/// About Apple Mail's link-tooltip width.
+const LINK_TOOLTIP_WIDTH: f32 = 420.0;
 
 fn open_link(visible: String, target: String, window: &mut Window, cx: &mut App) {
     if !matches!(
@@ -460,8 +559,26 @@ fn to_u32(color: [u8; 4]) -> u32 {
     (color[0] as u32) << 24 | (color[1] as u32) << 16 | (color[2] as u32) << 8 | color[3] as u32
 }
 
+#[cfg(test)]
 fn parse_to_dom(document: &SanitizedDocument, images: &Images, show_quotes: bool) -> Vec<Node> {
-    let sheet = parse_sheet(&document.stylesheet);
+    parse_to_dom_at(
+        document,
+        images,
+        show_quotes,
+        layout::DEFAULT_DOCUMENT_WIDTH,
+    )
+}
+
+/// Build the styled tree for a document laid out `width` wide. The width decides which `@media`
+/// blocks apply, as the viewport does in a browser: mobile-first mail keeps its desktop layout
+/// (side-by-side columns, wider containers) behind `@media (min-width: …)`.
+fn parse_to_dom_at(
+    document: &SanitizedDocument,
+    images: &Images,
+    show_quotes: bool,
+    width: f32,
+) -> Vec<Node> {
+    let sheet = parse_sheet(&document.stylesheet, width);
     let mut roots = Vec::new();
     let parent = Style::default();
     let ancestors = Vec::new();
@@ -508,10 +625,16 @@ fn build_children(
                 let mut presentational = map.clone();
                 presentational.remove("style");
                 let mut style = resolve_style(&tag, &presentational, parent);
-                apply_sheet(&mut style, &tag, &map, ancestors, sheet);
-                if let Some(inline) = map.get("style") {
-                    apply_inline_style(&mut style, inline);
-                }
+                // CSS's order: sheet, inline, then `!important` sheet, then `!important` inline —
+                // which is how a `@media` rule overrides an inline width.
+                let (inline_normal, inline_important) = map
+                    .get("style")
+                    .map(|inline| split_important(inline))
+                    .unwrap_or_default();
+                apply_sheet(&mut style, &tag, &map, ancestors, sheet, false);
+                apply_inline_style(&mut style, &inline_normal);
+                apply_sheet(&mut style, &tag, &map, ancestors, sheet, true);
+                apply_inline_style(&mut style, &inline_important);
                 if matches!(tag.as_str(), "td" | "th")
                     && let Some(padding) = inherited_cell_padding
                     && style.padding_top == 0.0
@@ -573,8 +696,34 @@ fn build_children(
 /// last compound is matched, which is the common case in mail.
 struct Rule {
     compounds: Vec<Compound>,
-    declarations: String,
+    /// The rule's declarations, split by `!important`, which cascades after inline style.
+    normal: String,
+    important: String,
     specificity: u32,
+}
+
+/// Split a declaration block into its normal and `!important` halves.
+fn split_important(declarations: &str) -> (String, String) {
+    let mut normal = String::new();
+    let mut important = String::new();
+    for declaration in declarations.split(';') {
+        let declaration = declaration.trim();
+        if declaration.is_empty() {
+            continue;
+        }
+        let target = if declaration
+            .to_ascii_lowercase()
+            .trim_end()
+            .ends_with("!important")
+        {
+            &mut important
+        } else {
+            &mut normal
+        };
+        target.push_str(declaration);
+        target.push(';');
+    }
+    (normal, important)
 }
 
 #[derive(Clone)]
@@ -584,8 +733,8 @@ struct Compound {
     classes: Vec<String>,
 }
 
-fn parse_sheet(css: &str) -> Vec<Rule> {
-    let css = strip_at_rules(css);
+fn parse_sheet(css: &str, viewport_width: f32) -> Vec<Rule> {
+    let css = resolve_at_rules(css, viewport_width);
     // Drop comments.
     let mut cleaned = String::with_capacity(css.len());
     let mut rest = css.as_str();
@@ -639,9 +788,11 @@ fn parse_sheet(css: &str) -> Vec<Rule> {
                     + compound.classes.len() as u32 * 10
                     + compound.tag.is_some() as u32
             });
+            let (normal, important) = split_important(declarations);
             rules.push(Rule {
                 compounds,
-                declarations: declarations.to_string(),
+                normal,
+                important,
                 specificity,
             });
         }
@@ -649,7 +800,9 @@ fn parse_sheet(css: &str) -> Vec<Rule> {
     rules
 }
 
-fn strip_at_rules(css: &str) -> String {
+/// Unwrap the `@media` blocks that apply at `viewport_width` and drop every other at-rule
+/// (`@font-face`, `@import`, `@supports`, non-matching media).
+fn resolve_at_rules(css: &str, viewport_width: f32) -> String {
     let bytes = css.as_bytes();
     let mut output = String::with_capacity(css.len());
     let mut index = 0;
@@ -674,6 +827,8 @@ fn strip_at_rules(css: &str) -> String {
             copy_start = index;
             continue;
         }
+        let prelude = &css[index + 1..cursor];
+        let body_start = cursor + 1;
         let mut depth = 1usize;
         cursor += 1;
         while cursor < bytes.len() && depth > 0 {
@@ -684,11 +839,84 @@ fn strip_at_rules(css: &str) -> String {
             }
             cursor += 1;
         }
+        let body_end = if depth == 0 { cursor - 1 } else { cursor };
+        if let Some(query) = prelude
+            .trim()
+            .strip_prefix("media")
+            .filter(|_| prelude.trim().len() > "media".len())
+        {
+            if media_matches(query, viewport_width) {
+                output.push_str(&resolve_at_rules(
+                    &css[body_start..body_end],
+                    viewport_width,
+                ));
+                output.push(' ');
+            }
+        }
         index = cursor;
         copy_start = index;
     }
     output.push_str(&css[copy_start..]);
     output
+}
+
+/// Whether a media query list applies to a light-themed screen `viewport_width` px wide. Any part
+/// it does not understand fails the query, so an unknown feature never switches layouts.
+fn media_matches(query: &str, viewport_width: f32) -> bool {
+    query.split(',').any(|single| {
+        let single = single.trim().to_ascii_lowercase();
+        let (negated, single) = match single.strip_prefix("not ") {
+            Some(rest) => (true, rest.trim().to_string()),
+            None => (
+                false,
+                single
+                    .strip_prefix("only ")
+                    .unwrap_or(&single)
+                    .trim()
+                    .to_string(),
+            ),
+        };
+        let mut matched = true;
+        for part in single.split(" and ") {
+            let part = part.trim();
+            let ok = match part {
+                "" | "screen" | "all" => true,
+                "print" | "speech" | "tv" | "handheld" => false,
+                feature if feature.starts_with('(') && feature.ends_with(')') => {
+                    feature_matches(&feature[1..feature.len() - 1], viewport_width)
+                }
+                _ => false,
+            };
+            matched &= ok;
+        }
+        matched != negated
+    })
+}
+
+fn feature_matches(feature: &str, viewport_width: f32) -> bool {
+    let Some((name, value)) = feature.split_once(':') else {
+        return false;
+    };
+    let (name, value) = (name.trim(), value.trim());
+    let px = || -> Option<f32> {
+        let number = value
+            .strip_suffix("px")
+            .map(|n| n.trim().parse::<f32>().ok())
+            .unwrap_or_else(|| {
+                value
+                    .strip_suffix("em")
+                    .and_then(|n| n.trim().parse::<f32>().ok())
+                    .map(|em| em * 16.0)
+            });
+        number
+    };
+    match name {
+        "min-width" | "min-device-width" => px().is_some_and(|min| viewport_width >= min),
+        "max-width" | "max-device-width" => px().is_some_and(|max| viewport_width <= max),
+        // Email is drawn on white paper whatever the app theme, so its dark-mode rules never apply.
+        "prefers-color-scheme" => value == "light",
+        _ => false,
+    }
 }
 
 fn parse_compound_selector(compound: &str) -> (Option<String>, Option<String>, Vec<String>) {
@@ -740,6 +968,7 @@ fn apply_sheet(
     attrs: &HashMap<String, String>,
     ancestors: &[(String, HashMap<String, String>)],
     sheet: &[Rule],
+    important: bool,
 ) {
     fn matches(compound: &Compound, tag: &str, attrs: &HashMap<String, String>) -> bool {
         let id = attrs.get("id").map(String::as_str).unwrap_or("");
@@ -780,7 +1009,14 @@ fn apply_sheet(
         .collect();
     matching.sort_by_key(|rule| rule.specificity);
     for rule in matching {
-        apply_inline_style(style, &rule.declarations);
+        apply_inline_style(
+            style,
+            if important {
+                &rule.important
+            } else {
+                &rule.normal
+            },
+        );
     }
 }
 
@@ -791,8 +1027,8 @@ struct GpuiMeasure<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Fragment, Images, Node, TextMeasure, browser_file, link_needs_confirmation, parse_to_dom,
-        prepare_document,
+        Fragment, Images, Node, TextMeasure, browser_file, link_needs_confirmation, media_matches,
+        pad_edges, parse_to_dom, parse_to_dom_at, prepare_document, resolve_at_rules,
     };
     use serde_json::{Value, json};
     use snail_ui::html::FontSpec;
@@ -877,6 +1113,70 @@ mod tests {
     }
 
     #[test]
+    fn media_queries_follow_the_width_mail_is_laid_out_at() {
+        assert!(media_matches(" screen and (min-width: 600px)", 640.0));
+        assert!(!media_matches(" screen and (min-width: 600px)", 480.0));
+        assert!(media_matches(" (max-width:600px)", 480.0));
+        assert!(!media_matches(" only screen and (max-width: 600px)", 640.0));
+        assert!(!media_matches(" print", 640.0));
+        assert!(!media_matches(" (prefers-color-scheme: dark)", 640.0));
+        assert!(media_matches(" print, screen and (min-width: 30em)", 640.0));
+        assert!(!media_matches(
+            " screen and (-webkit-min-device-pixel-ratio: 2)",
+            640.0
+        ));
+        assert!(media_matches(" not print", 640.0));
+    }
+
+    // Regression (Slickdeals): a mobile-first card's desktop layout is `@media (min-width)` rules
+    // marked `!important`, which must beat the inline mobile widths, as they do in Apple Mail.
+    #[test]
+    fn important_media_rules_override_inline_style_at_desktop_width() {
+        let document = prepare_document(
+            r#"<head><style>
+                @media screen and (min-width: 600px) { .dtop-w-580 { width: 580px !important; } }
+                .plain { width: 100px; }
+            </style></head>
+            <table class="dtop-w-580" style="width:290px"><tr><td>card</td></tr></table>
+            <table class="plain" style="width:200px"><tr><td>inline wins</td></tr></table>"#,
+        );
+        fn tables(nodes: &[Node], out: &mut Vec<Option<f32>>) {
+            for node in nodes {
+                if let Node::Element(element) = node {
+                    if element.tag == "table" {
+                        out.push(element.style.width);
+                    }
+                    tables(&element.children, out);
+                }
+            }
+        }
+        let widths_at = |width: f32| {
+            let mut out = Vec::new();
+            tables(
+                &parse_to_dom_at(&document, &Images::default(), true, width),
+                &mut out,
+            );
+            out.into_iter().flatten().collect::<Vec<_>>()
+        };
+        assert_eq!(widths_at(640.0), vec![580.0, 200.0]);
+        assert_eq!(widths_at(400.0), vec![290.0, 200.0]);
+    }
+
+    #[test]
+    fn nested_and_unknown_at_rules_are_resolved_or_dropped() {
+        let css = "@font-face { font-family: x; src: url(y) } \
+                   @media screen { @media (min-width: 100px) { .a { color: red } } } \
+                   @supports (display: grid) { .b { color: blue } } .c { color: green }";
+        let resolved = resolve_at_rules(css, 640.0);
+        assert!(resolved.contains(".a { color: red }"), "{resolved}");
+        assert!(
+            !resolved.contains(".b") && !resolved.contains("font-face"),
+            "{resolved}"
+        );
+        assert!(resolved.contains(".c { color: green }"));
+    }
+
+    #[test]
     fn browser_escape_hatch_writes_only_sanitized_inert_html() {
         let document = prepare_document(
             r#"<script>alert(1)</script><img src="https://tracker.test/p.gif"><p>safe</p>"#,
@@ -908,7 +1208,9 @@ mod tests {
                     "r:{:.1}:{:.1}:{:.1}:{:.1}:{color:?}:{radius:.1}",
                     rect.x, rect.y, rect.w, rect.h
                 ),
-                Fragment::Border { rect, color, width } => format!(
+                Fragment::Border {
+                    rect, color, width, ..
+                } => format!(
                     "b:{:.1}:{:.1}:{:.1}:{:.1}:{color:?}:{width:.1}",
                     rect.x, rect.y, rect.w, rect.h
                 ),
@@ -920,11 +1222,12 @@ mod tests {
                     color,
                     underline,
                     href,
+                    ..
                 } => format!(
                     "w:{x:.1}:{y:.1}:{text}:{:?}:{:.1}:{}:{}:{:?}:{underline}:{href:?}",
                     font.family, font.size, font.bold, font.italic, color
                 ),
-                Fragment::Image { rect, src } => format!(
+                Fragment::Image { rect, src, .. } => format!(
                     "i:{:.1}:{:.1}:{:.1}:{:.1}:{src}",
                     rect.x, rect.y, rect.w, rect.h
                 ),
@@ -951,6 +1254,26 @@ mod tests {
             "height_tenths": (output.height * 10.0).round() as i64,
             "fingerprint": fingerprint(&output),
         })
+    }
+
+    // Regression (Samsung): 1px grey lines along image edges, from GPUI's unpadded atlas.
+    #[test]
+    fn image_textures_are_padded_with_their_own_edges() {
+        // A 2x1 image: red then blue.
+        let pixels = [255, 0, 0, 255, 0, 0, 255, 255];
+        let padded = pad_edges(2, 1, &pixels);
+        let pixel = |x: usize, y: usize| &padded[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4];
+        assert_eq!(padded.len(), 4 * 3 * 4);
+        for y in 0..3 {
+            assert_eq!(pixel(0, y), &pixels[0..4], "left pad copies the left edge");
+            assert_eq!(pixel(1, y), &pixels[0..4]);
+            assert_eq!(pixel(2, y), &pixels[4..8]);
+            assert_eq!(
+                pixel(3, y),
+                &pixels[4..8],
+                "right pad copies the right edge"
+            );
+        }
     }
 
     #[test]

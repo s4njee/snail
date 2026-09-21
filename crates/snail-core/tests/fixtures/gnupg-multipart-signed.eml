@@ -1,0 +1,17 @@
+Content-Type: multipart/signed; boundary="gpg-boundary"; protocol="application/pgp-signature"; micalg=pgp-sha256
+MIME-Version: 1.0
+
+--gpg-boundary
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+Hello from GnuPG.
+--gpg-boundary
+Content-Type: application/pgp-signature; name="signature.asc"
+
+-----BEGIN PGP SIGNATURE-----
+Version: GnuPG
+
+ZmFrZQ==
+-----END PGP SIGNATURE-----
+--gpg-boundary--

@@ -142,7 +142,11 @@ impl Label {
 /// Gmail's: trash beats spam beats draft beats sent beats inbox, and no mailbox label means
 /// archived).
 pub fn gmail_primary_kind(label_ids: &[String]) -> MailboxKind {
-    let has = |name: &str| label_ids.iter().any(|label| label.eq_ignore_ascii_case(name));
+    let has = |name: &str| {
+        label_ids
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case(name))
+    };
     if has("TRASH") {
         MailboxKind::Trash
     } else if has("SPAM") {
@@ -269,7 +273,10 @@ mod tests {
             gmail_primary_kind(&labels(&["INBOX", "TRASH"])),
             MailboxKind::Trash
         );
-        assert_eq!(gmail_primary_kind(&labels(&["INBOX", "UNREAD"])), MailboxKind::Inbox);
+        assert_eq!(
+            gmail_primary_kind(&labels(&["INBOX", "UNREAD"])),
+            MailboxKind::Inbox
+        );
         assert_eq!(gmail_primary_kind(&labels(&["SENT"])), MailboxKind::Sent);
         assert_eq!(gmail_primary_kind(&labels(&["DRAFT"])), MailboxKind::Drafts);
         assert_eq!(gmail_primary_kind(&labels(&["SPAM"])), MailboxKind::Other);

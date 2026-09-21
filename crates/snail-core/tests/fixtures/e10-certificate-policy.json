@@ -1,0 +1,32 @@
+[
+  {
+    "name": "valid signing subkey",
+    "facts": { "binding_valid": true, "revoked": false, "expired": false, "signing_flag": true, "hash": "sha256" },
+    "expected": "valid"
+  },
+  {
+    "name": "revoked key",
+    "facts": { "binding_valid": true, "revoked": true, "expired": false, "signing_flag": true, "hash": "sha256" },
+    "expected": "Revoked"
+  },
+  {
+    "name": "expired subkey",
+    "facts": { "binding_valid": true, "revoked": false, "expired": true, "signing_flag": true, "hash": "sha256" },
+    "expected": "Expired"
+  },
+  {
+    "name": "encryption-only subkey used to sign",
+    "facts": { "binding_valid": true, "revoked": false, "expired": false, "signing_flag": false, "hash": "sha256" },
+    "expected": "NotSigningCapable"
+  },
+  {
+    "name": "SHA-1 signature",
+    "facts": { "binding_valid": true, "revoked": false, "expired": false, "signing_flag": true, "hash": "sha1" },
+    "expected": "WeakHash"
+  },
+  {
+    "name": "broken binding chain",
+    "facts": { "binding_valid": false, "revoked": false, "expired": false, "signing_flag": true, "hash": "sha256" },
+    "expected": "InvalidBinding"
+  }
+]

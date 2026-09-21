@@ -6,19 +6,33 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{
+    Escape as InputEscape, Input, InputEvent, InputState, Textarea, TextareaState,
+};
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+use snail_core::pgp::VerificationState;
+use snail_ui::calendar::CalendarView;
+use snail_ui::commands::{CommandId, EnableGuard, ShortcutPlatform, command, display_binding};
 use snail_ui::empty::EmptyState;
+use snail_ui::palette::{NamedTarget, PaletteCandidate, PaletteTarget, candidates};
 use snail_ui::selection::Selection;
 use snail_ui::text::TextRole;
 
+use crate::calendar_model::{CalendarModel, RsvpDelivery};
+use crate::calendar_view::CalendarWorkspace;
+use crate::commands::RunCommand;
 use crate::dev_overlay::DevOverlay;
 use crate::icons::{Icon, icon};
 use crate::mail_model::{MailModel, MailboxRow, MessageRow, SearchHit};
+use crate::onboarding::Onboarding;
 use crate::settings;
+use crate::settings_model::SettingsModel;
+use crate::settings_view::{SettingsEvent, SettingsWorkspace};
 use crate::style::{self, ThemePref};
+use crate::sync_model::{OpenMessage, SyncChanged, SyncHub, SyncStatus};
 
 const PAGE: u32 = 200;
 
@@ -27,6 +41,8 @@ struct Reading {
     from: String,
     sender_addr: Option<String>,
     meta: String,
+    crypto: VerificationState,
+    invite: Option<snail_core::calendar::CalendarEvent>,
     body: BodyKind,
 }
 
@@ -82,12 +98,28 @@ enum SearchListRow {
     Hit(usize),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkspaceMode {
+    Mail,
+    Calendar,
+    Settings,
+}
+
 pub struct Shell {
     focus: FocusHandle,
+    list_focus: FocusHandle,
+    reading_focus: FocusHandle,
+    _activation: Subscription,
+    _focus_lost: Subscription,
     overlay: DevOverlay,
     _appearance: Subscription,
     _search_sub: Subscription,
     mail: MailModel,
+    calendar_model: CalendarModel,
+    calendar: Entity<CalendarWorkspace>,
+    settings_workspace: Entity<SettingsWorkspace>,
+    _settings_sub: Subscription,
+    workspace: WorkspaceMode,
     mailboxes: Vec<MailboxRow>,
     selected_mailbox: usize,
     rows: Arc<Vec<MessageRow>>,
@@ -113,6 +145,13 @@ pub struct Shell {
     search_query: String,
     search: Option<SearchResults>,
     search_generation: u64,
+    palette_input: Entity<InputState>,
+    palette_query: String,
+    palette_results: Vec<PaletteCandidate>,
+    palette_selected: usize,
+    palette_open: bool,
+    _palette_sub: Subscription,
+    app_menu_open: bool,
     /// The message whose reading is loaded, so render can reload it when the cursor moves without a
     /// handler (a search result arriving on the background executor sets the cursor).
     reading_id: Option<i64>,
@@ -128,23 +167,56 @@ pub struct Shell {
     /// Set when the debounce fires; the relayout itself runs in render, where the window's text
     /// system is available (the same pattern as `pending_remote`).
     html_relayout_due: bool,
+    /// Accounts and background sync (E4, E16). The shell re-reads the list when it reports.
+    sync: Entity<SyncHub>,
+    _sync_sub: Subscription,
+    _open_sub: Subscription,
+    /// The connect-an-account flow, alive only while it is on screen (E14.3).
+    onboarding: Option<Entity<Onboarding>>,
+    /// Marks the open message read after a short dwell (the handoff's ~1s); replacing it cancels.
+    mark_read: Option<Task<()>>,
 }
+
+/// How long a message must stay open before it counts as read.
+const READ_DWELL: Duration = Duration::from_millis(1000);
 
 /// How long the reading pane's width must hold still before HTML is laid out again. Long enough
 /// to span the frames of a window-edge drag, short enough to feel like a response to letting go.
 const HTML_RELAYOUT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(120);
 
 impl Shell {
-    pub fn new(mail: MailModel, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        mail: MailModel,
+        calendar_model: CalendarModel,
+        settings_model: SettingsModel,
+        sync: Entity<SyncHub>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus = cx.focus_handle();
+        let list_focus = cx.focus_handle();
+        let reading_focus = cx.focus_handle();
         window.focus(&focus, cx);
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() && window.focused(cx).is_none() {
+                window.focus(&this.focus, cx);
+            }
+        });
+        let focus_lost = cx.on_focus_lost(window, |this, window, cx| {
+            // A dialog or input with focus wins. Restore the shell only when the focus tree is
+            // genuinely empty, such as after closing a transient view or reactivating the window.
+            if window.is_window_active() && window.focused(cx).is_none() {
+                window.focus(&this.focus, cx);
+            }
+        });
         let appearance = cx.observe_window_appearance(window, |_this, _window, cx| {
             if settings::pref(cx) == ThemePref::System {
                 style::apply(ThemePref::System, cx);
                 cx.notify();
             }
         });
-        let inline_reply = cx.new(|cx| TextareaState::new(window, cx).placeholder("Write a reply…"));
+        let inline_reply =
+            cx.new(|cx| TextareaState::new(window, cx).placeholder("Write a reply…"));
         let search_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Search mail")
@@ -155,36 +227,100 @@ impl Shell {
                 this.on_search_changed(cx);
             }
         });
+        let palette_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Type a command, mailbox, calendar or date…")
+                .clean_on_escape()
+        });
+        let palette_sub = cx.subscribe(&palette_input, |this, state, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.palette_query = state.read(cx).value().to_string();
+                this.rebuild_palette();
+                this.palette_selected = 0;
+                cx.notify();
+            }
+        });
+        let open_sub = cx.subscribe_in(
+            &sync,
+            window,
+            |this, _hub, open: &OpenMessage, window, cx| {
+                this.open_message(open.0, window, cx);
+            },
+        );
+        let sync_sub = cx.subscribe_in(&sync, window, |this, _hub, _: &SyncChanged, window, cx| {
+            this.sync_refresh(window, cx);
+            cx.notify();
+        });
+        let calendar = cx.new(|cx| CalendarWorkspace::new(calendar_model.clone(), cx));
+        let settings_workspace =
+            cx.new(|cx| SettingsWorkspace::new(settings_model, sync.clone(), window, cx));
+        let settings_sub = cx.subscribe_in(
+            &settings_workspace,
+            window,
+            |this, _settings, event: &SettingsEvent, _window, cx| match event {
+                SettingsEvent::AddGoogle => {
+                    this.workspace = WorkspaceMode::Mail;
+                    this.sync.update(cx, |hub, cx| hub.begin_reconnect(cx));
+                    cx.notify();
+                }
+                SettingsEvent::OpenPgpManager => crate::pgp_keys::open(this.mail.clone(), cx),
+            },
+        );
+        let general = settings::general(cx);
         let mut shell = Self {
             focus,
+            list_focus,
+            reading_focus,
+            _activation: activation,
+            _focus_lost: focus_lost,
             overlay: DevOverlay::new(),
             _appearance: appearance,
             _search_sub: search_sub,
             mail,
+            calendar_model,
+            calendar,
+            settings_workspace,
+            _settings_sub: settings_sub,
+            workspace: WorkspaceMode::Mail,
             mailboxes: Vec::new(),
             selected_mailbox: 0,
             rows: Arc::new(Vec::new()),
             selection: Selection::new(),
             reading: None,
-            remote_enabled: std::env::var_os("SNAIL_REMOTE_IMAGES").is_some(),
+            remote_enabled: general.load_remote_images
+                || std::env::var_os("SNAIL_REMOTE_IMAGES").is_some(),
             pending_remote: Vec::new(),
             generation: 0,
             reading_scroll: ScrollHandle::new(),
             inline_reply,
             inline_open: false,
             undo: None,
-            group_threads: true,
+            group_threads: general.group_by_thread,
             move_picker: None,
             search_input,
             search_query: String::new(),
             search: None,
             search_generation: 0,
+            palette_input,
+            palette_query: String::new(),
+            palette_results: Vec::new(),
+            palette_selected: 0,
+            palette_open: false,
+            _palette_sub: palette_sub,
+            app_menu_open: false,
             reading_id: None,
             forced_message: None,
             html_width: None,
             html_relayout: None,
             html_relayout_due: false,
-        };        shell.reload(window, cx);
+            sync,
+            _sync_sub: sync_sub,
+            _open_sub: open_sub,
+            onboarding: None,
+            mark_read: None,
+        };
+        shell.reload(window, cx);
+        shell.rebuild_palette();
         // Harvest contacts once on the background executor so autocomplete has data (E7.3).
         {
             let mail = shell.mail.clone();
@@ -194,23 +330,70 @@ impl Shell {
                 })
                 .detach();
         }
+        // Previews stored with CSS in them are re-derived once; show the fixed ones straight away.
+        {
+            let mail = shell.mail.clone();
+            let repair = cx
+                .background_executor()
+                .spawn(async move { mail.repair_previews() });
+            cx.spawn(async move |this, cx| {
+                let repaired = repair.await;
+                if repaired > 0 {
+                    log::info!("repaired {repaired} message preview(s)");
+                    this.update(cx, |this, cx| {
+                        this.refresh_rows(cx);
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            })
+            .detach();
+        }
         shell
     }
 
     /// Read mailboxes and the selected mailbox's page. Local and fast; E5.12 moves it off-thread.
     fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refresh_rows(cx) {
+            self.load_reading(window, cx);
+        }
+    }
+
+    /// Sync changed the store: refresh the list, but leave the open message alone — re-laying it
+    /// out would jump its scroll back to the top every time mail arrived. It is reloaded only if
+    /// it is gone, or the cursor moved because it was.
+    fn sync_refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let open = self.reading_id;
+        if !self.refresh_rows(cx) {
+            return;
+        }
+        let still_there = open.is_some_and(|id| self.mail.message(id).is_some());
+        if self.selection.cursor() != open || !still_there || self.reading.is_none() {
+            self.load_reading(window, cx);
+        }
+    }
+
+    /// Re-read mailboxes and rows and reconcile the selection. False when a search owns the list
+    /// (the search is re-run instead), so there is no reading to reload.
+    fn refresh_rows(&mut self, cx: &mut Context<Self>) -> bool {
         // If the provider rejected a triage op, put the row back and say so (E8.4).
         let rolled_back = self.mail.rollback_failed_triage();
         if rolled_back > 0 {
             self.undo = Some(UndoBar {
                 ops: Vec::new(),
-                label: format!(
-                    "{rolled_back} change(s) couldn't be applied and were rolled back"
-                ),
+                label: format!("{rolled_back} change(s) couldn't be applied and were rolled back"),
                 at: Instant::now(),
             });
         }
         self.mailboxes = self.mail.mailboxes();
+        // The Dock badge is the Inbox's unread count, across accounts (E16.8).
+        crate::dock::set_unread(
+            self.mailboxes
+                .iter()
+                .filter(|mailbox| mailbox.kind == "inbox")
+                .map(|mailbox| mailbox.unread)
+                .sum(),
+        );
         if self.selected_mailbox >= self.mailboxes.len() {
             self.selected_mailbox = 0;
         }
@@ -236,7 +419,7 @@ impl Shell {
             // The list is showing results, so refresh them instead of the mailbox rows (E9.6): a
             // triage that emptied a result must disappear from the results.
             self.run_search(cx);
-            return;
+            return false;
         }
         let ids: Vec<i64> = self.rows.iter().map(|row| row.id).collect();
         self.selection.reconcile(&ids);
@@ -245,7 +428,7 @@ impl Shell {
                 self.selection.select_in(&ids, *first);
             }
         }
-        self.load_reading(window, cx);
+        true
     }
 
     fn select_mailbox(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -262,6 +445,228 @@ impl Shell {
         cx.notify();
     }
 
+    fn rebuild_palette(&mut self) {
+        let mailboxes = self
+            .mailboxes
+            .iter()
+            .map(|mailbox| NamedTarget {
+                id: mailbox.id,
+                title: mailbox.name.clone(),
+            })
+            .collect::<Vec<_>>();
+        let calendars = self
+            .calendar_model
+            .calendars()
+            .into_iter()
+            .map(|calendar| NamedTarget {
+                id: calendar.id,
+                title: calendar.name,
+            })
+            .collect::<Vec<_>>();
+        let today = snail_ui::calendar::CivilDate::from_naive(chrono::Local::now().date_naive());
+        self.palette_results = candidates(&self.palette_query, &mailboxes, &calendars, today);
+        if self.palette_selected >= self.palette_results.len() {
+            self.palette_selected = self.palette_results.len().saturating_sub(1);
+        }
+    }
+
+    fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette_open = true;
+        self.app_menu_open = false;
+        self.palette_query.clear();
+        self.palette_selected = 0;
+        self.rebuild_palette();
+        let input = self.palette_input.clone();
+        input.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+            state.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette_open = false;
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    fn step_palette(&mut self, direction: i32, cx: &mut Context<Self>) {
+        if self.palette_results.is_empty() {
+            return;
+        }
+        let last = self.palette_results.len() - 1;
+        self.palette_selected = if direction < 0 {
+            self.palette_selected.saturating_sub(1)
+        } else {
+            (self.palette_selected + 1).min(last)
+        };
+        cx.notify();
+    }
+
+    fn activate_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(candidate) = self.palette_results.get(self.palette_selected).cloned() else {
+            return;
+        };
+        self.palette_open = false;
+        match candidate.target {
+            PaletteTarget::Command(CommandId::OpenPalette) => {
+                window.focus(&self.focus, cx);
+            }
+            PaletteTarget::Command(id) => {
+                window.focus(&self.focus, cx);
+                self.execute_command(id, window, cx);
+            }
+            PaletteTarget::Mailbox(id) => {
+                self.workspace = WorkspaceMode::Mail;
+                if let Some(index) = self.mailboxes.iter().position(|mailbox| mailbox.id == id) {
+                    self.select_mailbox(index, window, cx);
+                }
+                window.focus(&self.list_focus, cx);
+            }
+            PaletteTarget::Calendar(id) => {
+                self.workspace = WorkspaceMode::Calendar;
+                self.calendar
+                    .update(cx, |calendar, cx| calendar.show_calendar(id, cx));
+                window.focus(&self.focus, cx);
+            }
+            PaletteTarget::Date(date) => {
+                self.workspace = WorkspaceMode::Calendar;
+                self.calendar
+                    .update(cx, |calendar, cx| calendar.go_to_date(date, cx));
+                window.focus(&self.focus, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn command_enabled(&self, id: CommandId, cx: &App) -> bool {
+        match command(id).enable {
+            EnableGuard::Always => true,
+            EnableGuard::HasMessages => !self.rows.is_empty(),
+            EnableGuard::HasSelection => self.selection.cursor().is_some(),
+            EnableGuard::HasReading => self.reading.is_some(),
+            EnableGuard::ComposeOpen => false,
+            EnableGuard::EventEditorOpen => self.calendar.read(cx).has_editor(),
+        }
+    }
+
+    fn execute_command(
+        &mut self,
+        id: CommandId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.palette_open {
+            match id {
+                CommandId::PalettePrevious => self.step_palette(-1, cx),
+                CommandId::PaletteNext => self.step_palette(1, cx),
+                CommandId::PaletteConfirm => self.activate_palette(window, cx),
+                CommandId::Cancel => self.close_palette(window, cx),
+                CommandId::OpenPalette => self.close_palette(window, cx),
+                _ => return false,
+            }
+            return true;
+        }
+        if self.move_picker.is_some() {
+            match id {
+                CommandId::PreviousMessage => self.move_picker_step(-1),
+                CommandId::NextMessage => self.move_picker_step(1),
+                CommandId::ConfirmSelection => self.commit_move(window, cx),
+                CommandId::Cancel => self.move_picker = None,
+                _ => return false,
+            }
+            cx.notify();
+            return true;
+        }
+        if !self.command_enabled(id, cx) {
+            return false;
+        }
+
+        let ids: Vec<i64> = match &self.search {
+            Some(search) => search.hits.iter().map(|hit| hit.id).collect(),
+            None => self.rows.iter().map(|row| row.id).collect(),
+        };
+        match id {
+            CommandId::PreviousMessage => {
+                self.selection.move_by(-1, &ids);
+                self.load_reading(window, cx);
+            }
+            CommandId::NextMessage => {
+                self.selection.move_by(1, &ids);
+                self.load_reading(window, cx);
+            }
+            CommandId::ConfirmSelection => return false,
+            CommandId::Compose => crate::compose::open(self.mail.clone(), Default::default(), cx),
+            CommandId::Reply => self.compose_reply(false, cx),
+            CommandId::ReplyAll => self.compose_reply(true, cx),
+            CommandId::Forward => self.compose_forward(cx),
+            CommandId::Trash => self.triage_selection(
+                snail_core::triage::TriageAction::Trash,
+                "Trashed",
+                window,
+                cx,
+            ),
+            CommandId::Archive => self.triage_selection(
+                snail_core::triage::TriageAction::Archive,
+                "Archived",
+                window,
+                cx,
+            ),
+            CommandId::ArchiveConversation => self.archive_thread(window, cx),
+            CommandId::ToggleRead => self.toggle_read(window, cx),
+            CommandId::MoveToMailbox => self.open_move_picker(cx),
+            CommandId::ToggleThreadGrouping => {
+                self.group_threads = !self.group_threads;
+                self.reload(window, cx);
+            }
+            CommandId::ToggleRemoteImages => {
+                self.remote_enabled = !self.remote_enabled;
+                self.load_reading(window, cx);
+            }
+            CommandId::ToggleBodyPreference => {
+                settings::toggle_body_preference(cx);
+                self.load_reading(window, cx);
+            }
+            CommandId::FocusSearch => {
+                self.workspace = WorkspaceMode::Mail;
+                self.focus_search(window, cx);
+            }
+            CommandId::OpenPalette => self.open_palette(window, cx),
+            CommandId::SaveEvent => self
+                .calendar
+                .update(cx, |calendar, cx| calendar.save_open_editor(cx)),
+            CommandId::Cancel => {
+                if self.calendar.read(cx).has_editor() {
+                    self.calendar
+                        .update(cx, |calendar, cx| calendar.cancel_open_editor(cx));
+                } else if self.search.is_some() {
+                    self.clear_search(window, cx);
+                } else {
+                    return false;
+                }
+            }
+            CommandId::CycleAppearance => {
+                let next = match settings::pref(cx) {
+                    ThemePref::System => ThemePref::Light,
+                    ThemePref::Light => ThemePref::Dark,
+                    ThemePref::Dark => ThemePref::System,
+                };
+                settings::set(next, cx);
+            }
+            CommandId::ToggleDiagnostics => self.overlay.toggle(),
+            CommandId::ShowMail => self.workspace = WorkspaceMode::Mail,
+            CommandId::ShowCalendar => self.workspace = WorkspaceMode::Calendar,
+            CommandId::ShowSettings => self.workspace = WorkspaceMode::Settings,
+            CommandId::Quit => cx.quit(),
+            CommandId::Send
+            | CommandId::PalettePrevious
+            | CommandId::PaletteNext
+            | CommandId::PaletteConfirm => return false,
+        }
+        cx.notify();
+        true
+    }
+
     fn load_reading(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.generation += 1;
         self.pending_remote.clear();
@@ -271,6 +676,8 @@ impl Shell {
             .cursor()
             .and_then(|id| self.read_message(id, window, cx));
         self.reading_id = self.selection.cursor();
+        self.schedule_mark_read(cx);
+        self.schedule_pgp_analysis(cx);
 
         // If a message has remote images and the user has unblocked them, fetch on the background
         // executor; the result lands in `pending_remote` and is applied on the next render (E6.8).
@@ -279,7 +686,8 @@ impl Shell {
             .as_ref()
             .and_then(|reading| reading.sender_addr.as_deref())
             .is_some_and(|sender| settings::always_load_images_from(sender, cx));
-        if !self.remote_enabled && !sender_allowed && self.forced_message != self.selection.cursor() {
+        if !self.remote_enabled && !sender_allowed && self.forced_message != self.selection.cursor()
+        {
             return;
         }
         let urls = match &self.reading {
@@ -301,6 +709,87 @@ impl Shell {
             log::info!("html: fetching {} remote image(s)", urls.len());
             self.fetch_remote(urls, cx);
         }
+    }
+
+    /// PGP parsing, certificate policy and decryption are always off the UI thread. The task
+    /// returns display-only memory; it never writes decrypted bytes through `MailModel`'s store.
+    fn schedule_pgp_analysis(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.reading_id else { return };
+        let Some(raw) = self.mail.raw(id) else { return };
+        let mail = self.mail.clone();
+        let task = cx.background_executor().spawn(async move {
+            let result = mail.analyze_pgp(&raw);
+            let display_plain = result.plaintext.as_deref().and_then(|plaintext| {
+                snail_core::mime::parse_raw(plaintext)
+                    .ok()
+                    .and_then(|parsed| parsed.plain)
+                    .or_else(|| String::from_utf8(plaintext.to_vec()).ok())
+            });
+            (result.state, display_plain)
+        });
+        cx.spawn(async move |this, cx| {
+            let (state, display_plain) = task.await;
+            this.update(cx, |this, cx| {
+                if this.reading_id != Some(id) {
+                    return;
+                }
+                if let Some(reading) = &mut this.reading {
+                    reading.crypto = state;
+                    if let Some(plain) = display_plain {
+                        reading.body = plain_body(plain);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Show one message, wherever it is filed: a clicked notification (E16.8). Leaves any search,
+    /// switches to the message's mailbox, selects it, and brings the window forward.
+    fn open_message(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.is_some() {
+            self.clear_search(window, cx);
+        }
+        if let Some(mailbox) = self.mail.mailbox_of(id) {
+            if let Some(index) = self.mailboxes.iter().position(|row| row.id == mailbox) {
+                self.selected_mailbox = index;
+                self.selection = Selection::new();
+                self.refresh_rows(cx);
+            }
+        }
+        self.select_message(id, window, cx);
+        window.activate_window();
+    }
+
+    /// Mark the open message read once it has been open for [`READ_DWELL`] — through the triage
+    /// queue, so it reaches Gmail like any other change, but without an undo bar.
+    fn schedule_mark_read(&mut self, cx: &mut Context<Self>) {
+        self.mark_read = None;
+        let Some(id) = self.reading_id else {
+            return;
+        };
+        if !self.mail.message(id).is_some_and(|row| row.unread) {
+            return;
+        }
+        self.mark_read = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(READ_DWELL).await;
+            this.update(cx, |this, cx| {
+                if this.reading_id != Some(id) {
+                    return;
+                }
+                this.mail
+                    .triage(id, &snail_core::triage::TriageAction::MarkRead(true));
+                // Read here, so its notification is no longer news.
+                cx.dismiss_system_notification(&crate::notify::message_tag(id));
+                this.mark_read = None;
+                // Refresh counts and the row's dot without touching the open message.
+                this.refresh_rows(cx);
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     fn fetch_remote(&mut self, urls: Vec<(String, String)>, cx: &mut Context<Self>) {
@@ -473,6 +962,8 @@ impl Shell {
 
     fn read_message(&self, id: i64, window: &mut Window, cx: &mut App) -> Option<Reading> {
         let row = self.mail.message(id)?;
+        let raw = self.mail.raw(id);
+        let invite = raw.as_deref().and_then(snail_core::mime::calendar_invite);
         let parsed = self
             .mail
             .parsed_with_preference(id, settings::body_preference(cx))?;
@@ -530,6 +1021,8 @@ impl Shell {
                 .date
                 .map(|date| format!("{date}"))
                 .unwrap_or_else(|| "(no date)".into()),
+            crypto: VerificationState::NotSigned,
+            invite,
             body,
         })
     }
@@ -596,7 +1089,190 @@ impl Shell {
         }
     }
 
-    fn titlebar(palette: &snail_ui::theme::Theme, _window: &mut Window, cx: &App) -> AnyElement {
+    fn palette_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.palette_open {
+            return None;
+        }
+        let palette = style::palette(cx);
+        let mut results = div()
+            .flex()
+            .flex_col()
+            .max_h(px(430.0))
+            .overflow_y_scrollbar();
+        for (index, candidate) in self.palette_results.iter().cloned().enumerate() {
+            let selected = index == self.palette_selected;
+            let enabled = match candidate.target {
+                PaletteTarget::Command(id) => self.command_enabled(id, cx),
+                _ => true,
+            };
+            let detail = match candidate.target {
+                PaletteTarget::Command(id) => format!(
+                    "{}  ·  {}",
+                    candidate.detail,
+                    display_binding(
+                        command(id).default_binding,
+                        if cfg!(target_os = "macos") {
+                            ShortcutPlatform::Mac
+                        } else {
+                            ShortcutPlatform::Other
+                        }
+                    )
+                ),
+                _ => candidate.detail.to_string(),
+            };
+            results = results.child(
+                div()
+                    .id(("palette-result", index))
+                    .h(px(44.0))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .rounded(px(palette.radii.button))
+                    .opacity(if enabled { 1.0 } else { 0.45 })
+                    .when(selected, |this| {
+                        this.bg(style::color(palette.colors.accent_tint))
+                    })
+                    .when(enabled, |this| {
+                        this.cursor_pointer().on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                this.palette_selected = index;
+                                this.activate_palette(window, cx);
+                            }),
+                        )
+                    })
+                    .child(style::text(candidate.title, TextRole::EventTitle, cx))
+                    .child(div().flex_1())
+                    .child(style::text(detail, TextRole::ReadingMeta, cx)),
+            );
+        }
+        if self.palette_results.is_empty() {
+            results = results.child(
+                div()
+                    .h(px(70.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(style::text("No matches", TextRole::ReadingMeta, cx)),
+            );
+        }
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .bg(rgba(0x11182742))
+                .flex()
+                .justify_center()
+                .items_start()
+                .pt(px(90.0))
+                .child(
+                    div()
+                        .id("command-palette")
+                        .key_context("Search")
+                        .w(px(620.0))
+                        .max_w(px(620.0))
+                        .p_2()
+                        .rounded(px(13.0))
+                        .border_1()
+                        .border_color(style::color(palette.colors.border_strong))
+                        .bg(style::color(palette.colors.card))
+                        .shadow_lg()
+                        .child(div().px_2().pb_2().child(Input::new(&self.palette_input)))
+                        .child(results),
+                )
+                .into_any_element(),
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn fallback_menu_button(&self, _cx: &mut Context<Self>) -> AnyElement {
+        div().into_any_element()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn fallback_menu_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let palette = style::palette(cx);
+        div()
+            .id("fallback-menu-button")
+            .h(px(30.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .rounded(px(palette.radii.button))
+            .cursor_pointer()
+            .hover(|this| this.bg(style::color(palette.colors.sunken)))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.app_menu_open = !this.app_menu_open;
+                cx.notify();
+            }))
+            .child(style::text("Menu", TextRole::ButtonLabel, cx))
+            .into_any_element()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn fallback_menu_overlay(&self, _cx: &mut Context<Self>) -> Option<AnyElement> {
+        None
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn fallback_menu_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.app_menu_open {
+            return None;
+        }
+        let palette = style::palette(cx);
+        let mut card = div()
+            .absolute()
+            .top(px(44.0))
+            .right(px(12.0))
+            .w(px(300.0))
+            .max_h(px(620.0))
+            .overflow_y_scrollbar()
+            .p_2()
+            .rounded(px(palette.radii.card))
+            .border_1()
+            .border_color(style::color(palette.colors.border_strong))
+            .bg(style::color(palette.colors.card))
+            .shadow_lg();
+        for item in snail_ui::commands::commands()
+            .iter()
+            .filter(|command| command.menu.is_some())
+        {
+            let id = item.id;
+            let enabled = self.command_enabled(id, cx);
+            card = card.child(
+                div()
+                    .h(px(34.0))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .rounded(px(palette.radii.button))
+                    .opacity(if enabled { 1.0 } else { 0.45 })
+                    .when(enabled, |this| {
+                        this.cursor_pointer()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.app_menu_open = false;
+                                this.execute_command(id, window, cx);
+                            }))
+                    })
+                    .child(style::text(item.title, TextRole::ButtonLabel, cx))
+                    .child(div().flex_1())
+                    .child(style::text(
+                        display_binding(item.default_binding, ShortcutPlatform::Other),
+                        TextRole::EventTime,
+                        cx,
+                    )),
+            );
+        }
+        Some(card.into_any_element())
+    }
+
+    fn titlebar(
+        &self,
+        palette: &snail_ui::theme::Theme,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let calendar_view = self.calendar.read(cx).view();
         div()
             .h(px(palette.metrics.titlebar_h))
             .flex_none()
@@ -615,9 +1291,119 @@ impl Shell {
                     .gap_3()
                     .when(cfg!(target_os = "macos"), |this| this.pl(px(78.0)))
                     .child(style::text("Snail", TextRole::ListHeaderTitle, cx))
-                    .child(style::text("Inbox", TextRole::SectionLabel, cx)),
+                    .child(self.workspace_button("workspace-mail", "Mail", WorkspaceMode::Mail, cx))
+                    .child(self.workspace_button(
+                        "workspace-calendar",
+                        "Calendar",
+                        WorkspaceMode::Calendar,
+                        cx,
+                    ))
+                    .child(self.workspace_button(
+                        "workspace-settings",
+                        "Settings",
+                        WorkspaceMode::Settings,
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .id("command-palette-button")
+                            .h(px(30.0))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .rounded(px(palette.radii.button))
+                            .cursor_pointer()
+                            .hover(|this| this.bg(style::color(palette.colors.sunken)))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                if this.palette_open {
+                                    this.close_palette(window, cx);
+                                } else {
+                                    this.open_palette(window, cx);
+                                }
+                            }))
+                            .child(style::text(
+                                if cfg!(target_os = "macos") {
+                                    "Search…  ⌘K"
+                                } else {
+                                    "Search…  Ctrl+K"
+                                },
+                                TextRole::ButtonLabel,
+                                cx,
+                            )),
+                    ),
             )
-            .child(Self::window_controls(palette, cx))
+            .when(self.workspace == WorkspaceMode::Calendar, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .children(CalendarView::ALL.map(|view| {
+                            let selected = view == calendar_view;
+                            let calendar = self.calendar.clone();
+                            div()
+                                .id(("calendar-view", view as usize))
+                                .h(px(30.0))
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .rounded(px(palette.radii.button))
+                                .cursor_pointer()
+                                .when(selected, |this| {
+                                    this.bg(style::color(palette.colors.card))
+                                        .text_color(style::color(palette.colors.accent))
+                                })
+                                .hover(|this| this.bg(style::color(palette.colors.sunken)))
+                                .on_click(move |_, _, cx| {
+                                    calendar.update(cx, |calendar, cx| calendar.set_view(view, cx));
+                                })
+                                .child(style::text(view.label(), TextRole::ButtonLabel, cx))
+                        })),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .child(self.fallback_menu_button(cx))
+                    .child(Self::window_controls(palette, cx)),
+            )
+            .into_any_element()
+    }
+
+    fn workspace_button(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        mode: WorkspaceMode,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let palette = style::palette(cx);
+        let selected = self.workspace == mode;
+        div()
+            .id(id)
+            .h(px(30.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .rounded(px(palette.radii.button))
+            .cursor_pointer()
+            .when(selected, |this| {
+                this.bg(style::color(palette.colors.card))
+                    .text_color(style::color(palette.colors.accent))
+            })
+            .hover(|this| this.bg(style::color(palette.colors.sunken)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.workspace = mode;
+                if mode == WorkspaceMode::Mail {
+                    let general = settings::general(cx);
+                    this.remote_enabled = general.load_remote_images
+                        || std::env::var_os("SNAIL_REMOTE_IMAGES").is_some();
+                    this.group_threads = general.group_by_thread;
+                }
+                cx.notify();
+            }))
+            .child(style::text(label, TextRole::ButtonLabel, cx))
             .into_any_element()
     }
 
@@ -677,15 +1463,47 @@ impl Shell {
             .border_color(style::color(palette.colors.border_soft))
             .child(
                 div()
+                    .id("open-calendar")
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_2()
+                    .mb_2()
+                    .rounded(px(palette.radii.button))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(style::color(palette.colors.accent_tint)))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.workspace = WorkspaceMode::Calendar;
+                        cx.notify();
+                    }))
+                    .child(icon(Icon::Calendar).text_color(style::color(palette.colors.accent)))
+                    .child(style::text("Calendar", TextRole::SidebarItem, cx)),
+            )
+            .child(
+                div()
+                    .id("pgp-key-manager")
                     .px_2()
                     .pb_2()
-                    .child(style::text("Mailboxes", TextRole::SectionLabel, cx)),
+                    .hover(|this| this.bg(style::color(palette.colors.sunken)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _window, cx| {
+                            crate::pgp_keys::open(this.mail.clone(), cx);
+                        }),
+                    )
+                    .child(style::text(
+                        "Mailboxes · PGP keys…",
+                        TextRole::SectionLabel,
+                        cx,
+                    )),
             )
             .children(mailboxes.into_iter().enumerate().map(|(index, mailbox)| {
                 let selected = index == self.selected_mailbox;
                 Self::sidebar_item(palette, cx, index, mailbox, selected)
             }))
             .child(div().flex_1())
+            .child(self.sync_footer(palette, cx))
             .when(self.mail.pending_sends() > 0, |this| {
                 let (failed, pending) = self.mail.send_queue();
                 this.child(
@@ -723,6 +1541,74 @@ impl Shell {
                         }),
                 )
             })
+            .into_any_element()
+    }
+
+    /// One line of sync state at the foot of the sidebar; the sign-in case is a button.
+    fn sync_footer(&self, palette: &snail_ui::theme::Theme, cx: &mut Context<Self>) -> AnyElement {
+        let status = self.sync.read(cx).status().clone();
+        let (line, action) = match &status {
+            SyncStatus::Starting => (String::new(), false),
+            SyncStatus::Syncing {
+                first: true,
+                done,
+                total,
+            } if *total > 0 => (format!("Bringing in mail · {done} of {total}"), false),
+            SyncStatus::Syncing { first: true, .. } => ("Bringing in mail…".into(), false),
+            SyncStatus::Syncing { .. } => ("Checking for mail…".into(), false),
+            SyncStatus::UpToDate { at } => (
+                if at.elapsed() < Duration::from_secs(60) {
+                    "Up to date".into()
+                } else {
+                    format!("Updated {} min ago", at.elapsed().as_secs() / 60)
+                },
+                false,
+            ),
+            // Throttling is not being offline, and says why the count stopped moving.
+            SyncStatus::Offline(error) if error.contains("Quota exceeded") => {
+                ("Gmail rate limit · resuming shortly".into(), false)
+            }
+            SyncStatus::Offline(_) => ("Offline · will retry".into(), false),
+            SyncStatus::NeedsSignIn { .. } => ("Sign in to Gmail again ›".into(), true),
+            SyncStatus::NoClient => ("Set up Gmail ›".into(), true),
+        };
+        if line.is_empty() {
+            return div().into_any_element();
+        }
+        let tooltip = match &status {
+            SyncStatus::Offline(error) => Some(error.clone()),
+            SyncStatus::NeedsSignIn { address, message } => Some(format!("{address}: {message}")),
+            _ => None,
+        };
+        let role = if action {
+            TextRole::SidebarItemSelected
+        } else {
+            TextRole::SidebarCount
+        };
+        div()
+            .id("sync-status")
+            .px_2()
+            .py_1()
+            .when(action, |this| {
+                this.cursor_pointer()
+                    .rounded(px(palette.radii.button))
+                    .hover(|this| this.bg(style::color(palette.colors.accent_tint)))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.sync.update(cx, |hub, cx| hub.begin_reconnect(cx));
+                    }))
+            })
+            .when(!action, |this| {
+                this.cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.sync.update(cx, |hub, cx| hub.sync_now(cx));
+                    }))
+            })
+            .when_some(tooltip, |this, tooltip| {
+                this.tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+                })
+            })
+            .child(style::text(line, role, cx).truncate())
             .into_any_element()
     }
 
@@ -842,14 +1728,23 @@ impl Shell {
                     .child(style::text(meta, TextRole::ListHeaderMeta, cx)),
             )
             // Search always sits in the header, so an active query is visible and Escape-able (E9.6).
-            .child(div().child(Input::new(&self.search_input)));
+            .child(
+                div()
+                    .key_context("Search")
+                    .child(Input::new(&self.search_input)),
+            );
 
         let body = if let Some(search) = &self.search {
             Self::search_results(palette, search, selection, weak, cx)
         } else if self.rows.is_empty() {
+            let state = if self.sync.read(cx).is_first_sync() {
+                EmptyState::FirstSync
+            } else {
+                EmptyState::EmptyMailbox
+            };
             div()
                 .flex_1()
-                .child(Self::empty_state(palette, cx, EmptyState::EmptyMailbox))
+                .child(Self::empty_state(palette, cx, state))
                 .into_any_element()
         } else {
             let rows = self.rows.clone();
@@ -879,6 +1774,7 @@ impl Shell {
                 .into_any_element()
         };
 
+        let list_focus = self.list_focus.clone();
         div()
             .flex_none()
             .w(px(palette.metrics.list_w))
@@ -888,6 +1784,11 @@ impl Shell {
             .bg(style::color(palette.colors.canvas))
             .border_r_1()
             .border_color(style::color(palette.colors.border_soft))
+            .key_context("List")
+            .track_focus(&self.list_focus)
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                window.focus(&list_focus, cx);
+            })
             .child(header)
             .child(body)
             .into_any_element()
@@ -913,7 +1814,11 @@ impl Shell {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(style::text(message.to_string(), TextRole::ListHeaderMeta, cx))
+                .child(style::text(
+                    message.to_string(),
+                    TextRole::ListHeaderMeta,
+                    cx,
+                ))
                 .into_any_element();
         }
 
@@ -1029,6 +1934,7 @@ impl Shell {
         let subject = single_line(row.subject.as_deref().unwrap_or("(no subject)"));
         let preview = single_line(row.preview.as_deref().unwrap_or_default());
         let unread = row.unread;
+        let timestamp = row.date.map(row_timestamp).unwrap_or_default();
 
         let base = div()
             .relative()
@@ -1083,17 +1989,32 @@ impl Shell {
                 .flex_1()
                 .min_w_0()
                 .gap(px(snail_ui::text::MESSAGE_ROW_GAP))
+                // The sender, with the time pushed to the top-right corner, baseline-aligned
+                // (mail handoff, list row line 1). The sender truncates; the time never does.
                 .child(
-                    style::text(
-                        sender,
-                        if unread {
-                            TextRole::RowSenderUnread
-                        } else {
-                            TextRole::RowSenderRead
-                        },
-                        cx,
-                    )
-                    .truncate(),
+                    div()
+                        .flex()
+                        .items_baseline()
+                        .gap_2()
+                        .child(
+                            div().flex_1().min_w_0().child(
+                                style::text(
+                                    sender,
+                                    if unread {
+                                        TextRole::RowSenderUnread
+                                    } else {
+                                        TextRole::RowSenderRead
+                                    },
+                                    cx,
+                                )
+                                .truncate(),
+                            ),
+                        )
+                        .child(div().flex_none().child(style::text(
+                            timestamp,
+                            TextRole::RowTimestamp,
+                            cx,
+                        ))),
                 )
                 .child(
                     style::text(
@@ -1150,7 +2071,11 @@ impl Shell {
         let unread = self.mail.message(id).map(|row| row.unread).unwrap_or(false);
         self.triage_selection(
             snail_core::triage::TriageAction::MarkRead(unread),
-            if unread { "Marked read" } else { "Marked unread" },
+            if unread {
+                "Marked read"
+            } else {
+                "Marked unread"
+            },
             window,
             cx,
         );
@@ -1172,7 +2097,10 @@ impl Shell {
             .collect();
         let ops: Vec<i64> = ids
             .iter()
-            .filter_map(|id| self.mail.triage(*id, &snail_core::triage::TriageAction::Archive))
+            .filter_map(|id| {
+                self.mail
+                    .triage(*id, &snail_core::triage::TriageAction::Archive)
+            })
             .collect();
         if !ops.is_empty() {
             self.undo = Some(UndoBar {
@@ -1313,7 +2241,11 @@ impl Shell {
     /// Highlight a clicked picker row and commit it (E8.4).
     fn select_move_target(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(picker) = self.move_picker.as_mut() {
-            if let Some(index) = picker.mailboxes.iter().position(|(mailbox, _)| *mailbox == id) {
+            if let Some(index) = picker
+                .mailboxes
+                .iter()
+                .position(|(mailbox, _)| *mailbox == id)
+            {
                 picker.selected = index;
             }
         }
@@ -1330,7 +2262,8 @@ impl Shell {
         cx.notify();
     }
 
-    fn compose_reply(&mut self, all: bool, cx: &mut Context<Self>) {        let Some(id) = self.selection.cursor() else {
+    fn compose_reply(&mut self, all: bool, cx: &mut Context<Self>) {
+        let Some(id) = self.selection.cursor() else {
             return;
         };
         let Some(parsed) = self.mail.parsed(id) else {
@@ -1338,7 +2271,11 @@ impl Shell {
         };
         let self_addr = self.mail.first_account_address();
         let mut draft = snail_core::compose::reply(&parsed, self_addr.as_deref(), all);
-        if let Some(signature) = crate::settings::signature(cx) {
+        if let Some(signature) = self
+            .mail
+            .signature_for(self_addr.as_deref())
+            .or_else(|| crate::settings::signature_for(self_addr.as_deref(), cx))
+        {
             draft.body_text = snail_core::compose::with_signature(&draft.body_text, &signature);
         }
         crate::compose::open(self.mail.clone(), draft, cx);
@@ -1416,7 +2353,11 @@ impl Shell {
                         TextRole::ReadingMeta,
                         cx,
                     ))
-                    .child(style::text(participants.join(", "), TextRole::ReadingMeta, cx)),
+                    .child(style::text(
+                        participants.join(", "),
+                        TextRole::ReadingMeta,
+                        cx,
+                    )),
             );
 
         for message in thread {
@@ -1470,13 +2411,81 @@ impl Shell {
                             .child(style::text(sender, TextRole::CollapsedSender, cx))
                             .child(style::text(snippet, TextRole::CollapsedSnippet, cx)),
                     )
-                    .child(style::text(short_date(message.date), TextRole::CollapsedDate, cx)),
+                    .child(style::text(
+                        short_date(message.date),
+                        TextRole::CollapsedDate,
+                        cx,
+                    )),
             );
         }
         strip.into_any_element()
     }
 
-    fn reading_pane(&self, palette: &snail_ui::theme::Theme, cx: &mut Context<Self>) -> AnyElement {        let Some(reading) = &self.reading else {
+    fn rsvp_from_mail(&mut self, status: &'static str, cx: &mut Context<Self>) {
+        let Some(invite) = self
+            .reading
+            .as_ref()
+            .and_then(|reading| reading.invite.clone())
+        else {
+            return;
+        };
+        let model = self.calendar_model.clone();
+        let mail = self.mail.clone();
+        let subject = invite
+            .summary
+            .clone()
+            .unwrap_or_else(|| "Calendar invitation".into());
+        let task = cx.background_executor().spawn(async move {
+            let delivery = model.rsvp_invite(&invite, status, chrono::Utc::now().timestamp())?;
+            if let RsvpDelivery::Imip {
+                recipient,
+                calendar_reply,
+            } = delivery
+            {
+                let from = mail
+                    .first_account_address()
+                    .ok_or_else(|| anyhow::anyhow!("no sending account for RSVP"))?;
+                let answer = match status {
+                    "accepted" => "Accepted",
+                    "tentative" => "Tentatively accepted",
+                    "declined" => "Declined",
+                    _ => "Responded",
+                };
+                let draft = snail_core::compose::Draft {
+                    from_addr: Some(from),
+                    to: vec![snail_core::mime::Recipient {
+                        name: None,
+                        address: recipient,
+                    }],
+                    subject: format!("Re: {subject}"),
+                    body_text: format!("{answer}: {subject}"),
+                    attachments: vec![snail_core::compose::Attachment {
+                        filename: "invite.ics".into(),
+                        content_type: "text/calendar; method=REPLY; charset=utf-8".into(),
+                        bytes: calendar_reply.into_bytes(),
+                    }],
+                    ..Default::default()
+                };
+                let raw = snail_core::compose::build_raw(&draft)?;
+                mail.enqueue_send(&raw)
+                    .ok_or_else(|| anyhow::anyhow!("could not queue iMIP response"))?;
+            }
+            anyhow::Ok(())
+        });
+        cx.spawn(async move |this, cx| match task.await {
+            Ok(()) => {
+                this.update(cx, |this, cx| {
+                    this.sync.update(cx, |hub, cx| hub.sync_now(cx));
+                })
+                .ok();
+            }
+            Err(error) => log::warn!("could not respond to calendar invitation: {error:#}"),
+        })
+        .detach();
+    }
+
+    fn reading_pane(&self, palette: &snail_ui::theme::Theme, cx: &mut Context<Self>) -> AnyElement {
+        let Some(reading) = &self.reading else {
             return Self::empty_state(palette, cx, EmptyState::EmptyMailbox);
         };
         let is_html = matches!(&reading.body, BodyKind::Html { .. });
@@ -1507,6 +2516,24 @@ impl Shell {
             snail_core::mime::BodyPreference::Html => "Prefer plain text",
             snail_core::mime::BodyPreference::Plain => "Prefer HTML",
         };
+        let crypto_label = match &reading.crypto {
+            VerificationState::NotSigned => None,
+            VerificationState::Valid { signer, .. } => Some(format!("✓ Verified · {signer}")),
+            VerificationState::Unverified { detail } => Some(format!("? Unverified · {detail}")),
+            VerificationState::Failed { detail } => Some(format!("! Signature failed · {detail}")),
+            VerificationState::PolicyRejected { reason, .. } => {
+                Some(format!("! Signature rejected · {reason:?}"))
+            }
+            VerificationState::Encrypted { detail, .. } => Some(format!("🔒 {detail}")),
+            VerificationState::DecryptionFailed { detail } => Some(format!("! {detail}")),
+        };
+        let crypto_retry = matches!(
+            &reading.crypto,
+            VerificationState::Encrypted {
+                decrypted: false,
+                ..
+            } | VerificationState::DecryptionFailed { .. }
+        );
         let action = |label: &str| {
             div()
                 .px_2()
@@ -1537,6 +2564,7 @@ impl Shell {
                 cx,
             )
         });
+        let reading_focus = self.reading_focus.clone();
         div()
             .flex_1()
             .min_w_0()
@@ -1544,6 +2572,11 @@ impl Shell {
             .flex()
             .flex_col()
             .bg(style::color(palette.colors.canvas))
+            .key_context("Reading")
+            .track_focus(&self.reading_focus)
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                window.focus(&reading_focus, cx);
+            })
             .when_some(strip, |this, strip| this.child(strip))
             .child(
                 div()
@@ -1562,6 +2595,7 @@ impl Shell {
                     .child(
                         div()
                             .flex()
+                            .w_full()
                             .items_center()
                             .gap_3()
                             .child(
@@ -1594,12 +2628,23 @@ impl Shell {
                                         TextRole::ReadingMeta,
                                         cx,
                                     )),
-                            ),
+                            )
+                            .child(div().flex_1()),
                     )
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .gap_2()
+                            .when_some(crypto_label, |this, label| this.child(action(&label)))
+                            .when(crypto_retry, |this| {
+                                this.child(action("Retry PGP").on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _window, cx| {
+                                        this.schedule_pgp_analysis(cx);
+                                    }),
+                                ))
+                            })
                             .child(action(preference_label).on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _, window, cx| {
@@ -1648,6 +2693,66 @@ impl Shell {
                             }),
                     ),
             )
+            .when_some(reading.invite.clone(), |this, invite| {
+                let starts = invite
+                    .start_utc
+                    .and_then(|value| chrono::DateTime::from_timestamp(value, 0))
+                    .map(|value| value.format("%a, %b %-d · %H:%M UTC").to_string())
+                    .unwrap_or_else(|| "Time not supplied".into());
+                this.child(
+                    div()
+                        .mx_6()
+                        .mt_4()
+                        .p_4()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .rounded(px(palette.radii.card))
+                        .border_1()
+                        .border_color(style::color(palette.colors.border_soft))
+                        .bg(style::color(palette.colors.accent_tint))
+                        .child(
+                            div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .child(style::text(
+                                    invite
+                                        .summary
+                                        .unwrap_or_else(|| "Calendar invitation".into()),
+                                    TextRole::EventTitle,
+                                    cx,
+                                ))
+                                .child(style::text(starts, TextRole::EventTime, cx)),
+                        )
+                        .children(
+                            [
+                                ("accepted", "Accept"),
+                                ("tentative", "Maybe"),
+                                ("declined", "Decline"),
+                            ]
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, (status, label))| {
+                                div()
+                                    .id(("mail-rsvp", index))
+                                    .h(px(30.0))
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(palette.radii.button))
+                                    .border_1()
+                                    .border_color(style::color(palette.colors.border_soft))
+                                    .bg(style::color(palette.colors.card))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.rsvp_from_mail(status, cx)
+                                    }))
+                                    .child(style::text(label, TextRole::ButtonLabel, cx))
+                            }),
+                        ),
+                )
+            })
             .child(
                 div()
                     .id("reading-body")
@@ -1803,7 +2908,11 @@ impl Shell {
         let parsed = self.mail.parsed(id)?;
         let self_addr = self.mail.first_account_address();
         let mut draft = snail_core::compose::reply(&parsed, self_addr.as_deref(), false);
-        if let Some(signature) = crate::settings::signature(cx) {
+        if let Some(signature) = self
+            .mail
+            .signature_for(self_addr.as_deref())
+            .or_else(|| crate::settings::signature_for(self_addr.as_deref(), cx))
+        {
             draft.body_text = snail_core::compose::with_signature(&draft.body_text, &signature);
         }
         let typed = self.inline_reply.read(cx).value().to_string();
@@ -1826,7 +2935,9 @@ impl Shell {
     fn inline_send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(draft) = self.inline_reply_draft(cx) {
             if let Ok(raw) = snail_core::compose::build_raw(&draft) {
-                let _ = self.mail.enqueue_send(&raw);
+                if self.mail.enqueue_send(&raw).is_some() {
+                    self.sync.update(cx, |hub, cx| hub.sync_now(cx));
+                }
             }
         }
         self.inline_open = false;
@@ -1902,6 +3013,20 @@ fn short_date(epoch: Option<i64>) -> String {
     }
 }
 
+/// The list row's timestamp in the local zone: the time today, "Yesterday", then the date.
+fn row_timestamp(epoch: i64) -> String {
+    use chrono::{Local, Offset, TimeZone};
+    let offset = |at: i64| {
+        Local
+            .timestamp_opt(at, 0)
+            .single()
+            .map(|local| local.offset().fix().local_minus_utc())
+            .unwrap_or(0)
+    };
+    let now = current_epoch();
+    snail_ui::dates::row_timestamp(epoch, offset(epoch), now, offset(now))
+}
+
 fn initials(name: &str) -> String {
     name.split_whitespace()
         .filter_map(|word| word.chars().next())
@@ -1939,6 +3064,21 @@ impl Render for Shell {
         }
         let palette = style::palette(cx);
 
+        // No account yet, or a reconnect in progress: the connect flow replaces the mailbox.
+        let onboarding =
+            if self.workspace == WorkspaceMode::Mail && self.sync.read(cx).needs_onboarding() {
+                let hub = self.sync.clone();
+                Some(
+                    self.onboarding
+                        .get_or_insert_with(|| cx.new(|cx| Onboarding::new(hub, window, cx)))
+                        .clone(),
+                )
+            } else {
+                self.onboarding = None;
+                None
+            };
+        let onboarding_open = onboarding.is_some();
+
         let overlay = if self.overlay.visible {
             self.overlay.tick();
             cx.on_next_frame(window, |this, _window, cx| {
@@ -1952,8 +3092,8 @@ impl Render for Shell {
                     .right(px(8.0))
                     .p_2()
                     .rounded(px(6.0))
-                    .bg(rgba(0x1b1917e6))
-                    .text_color(rgb(0xf0ece6))
+                    .bg(rgba(0x191919e6))
+                    .text_color(rgb(0xededed))
                     .text_size(px(11.0))
                     .children(
                         self.overlay
@@ -1966,10 +3106,6 @@ impl Render for Shell {
             None
         };
 
-        let ids: Vec<i64> = match &self.search {
-            Some(search) => search.hits.iter().map(|hit| hit.id).collect(),
-            None => self.rows.iter().map(|row| row.id).collect(),
-        };
         let undo = self
             .undo
             .as_ref()
@@ -2020,6 +3156,16 @@ impl Render for Shell {
                 .justify_center()
                 .child(card)
         });
+        let command_palette = self.palette_overlay(cx);
+        let fallback_menu = self.fallback_menu_overlay(cx);
+        let root_context = match self.workspace {
+            WorkspaceMode::Mail => "Global List Reading",
+            WorkspaceMode::Calendar if self.calendar.read(cx).has_editor() => {
+                "Global Calendar Editor"
+            }
+            WorkspaceMode::Calendar => "Global Calendar",
+            WorkspaceMode::Settings => "Global",
+        };
         div()
             .relative()
             .size_full()
@@ -2027,94 +3173,67 @@ impl Render for Shell {
             .flex_col()
             .bg(style::color(palette.colors.canvas))
             .text_color(style::color(palette.colors.ink))
+            .key_context(root_context)
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                let modifiers = event.keystroke.modifiers;
-                // The move picker owns the keyboard while it is open (E8.4).
-                if this.move_picker.is_some() {
-                    match event.keystroke.key.as_str() {
-                        "escape" => this.move_picker = None,
-                        "up" => this.move_picker_step(-1),
-                        "down" => this.move_picker_step(1),
-                        "enter" => this.commit_move(window, cx),
-                        _ => {}
-                    }
-                    cx.notify();
+            // gpui-base deliberately propagates its own Escape action when the input has
+            // nothing internal to dismiss. Bridge that third-party action back into Snail's
+            // single generic command so palettes, searches and editors close while typing.
+            .on_action(cx.listener(move |this, _: &InputEscape, window, cx| {
+                if this.palette_open
+                    || this.move_picker.is_some()
+                    || this.calendar.read(cx).has_editor()
+                    || this.search.is_some()
+                {
+                    window.dispatch_action(Box::new(RunCommand(CommandId::Cancel)), cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .on_action(cx.listener(move |this, action: &RunCommand, window, cx| {
+                if onboarding_open
+                    && !matches!(
+                        action.0,
+                        CommandId::OpenPalette
+                            | CommandId::PalettePrevious
+                            | CommandId::PaletteNext
+                            | CommandId::PaletteConfirm
+                            | CommandId::Cancel
+                            | CommandId::CycleAppearance
+                            | CommandId::ToggleDiagnostics
+                            | CommandId::ShowMail
+                            | CommandId::ShowCalendar
+                            | CommandId::ShowSettings
+                            | CommandId::Quit
+                    )
+                {
                     return;
                 }
-                match event.keystroke.key.as_str() {
-                    "f2" => this.overlay.toggle(),
-                    "f3" => {
-                        let next = match settings::pref(cx) {
-                            ThemePref::System => ThemePref::Light,
-                            ThemePref::Light => ThemePref::Dark,
-                            ThemePref::Dark => ThemePref::System,
-                        };
-                        settings::set(next, cx);
-                    }
-                    "up" => {
-                        this.selection.move_by(-1, &ids);
-                        this.load_reading(window, cx);
-                    }
-                    "down" => {
-                        this.selection.move_by(1, &ids);
-                        this.load_reading(window, cx);
-                    }
-                    // F4 toggles remote images (E6.2's unblock), for now a global switch.
-                    "f4" => {
-                        this.remote_enabled = !this.remote_enabled;
-                        this.load_reading(window, cx);
-                    }
-                    "f5" => {
-                        settings::toggle_body_preference(cx);
-                        this.load_reading(window, cx);
-                    }
-                    // Compose / reply / forward (E7).
-                    "c" => crate::compose::open(this.mail.clone(), Default::default(), cx),
-                    "r" => this.compose_reply(event.keystroke.modifiers.shift, cx),
-                    "f" => this.compose_forward(cx),
-                    // ⌘F focuses search (E9.6).
-                    "f" if modifiers.platform => this.focus_search(window, cx),
-                    // Triage (E8): Cmd+Shift+A archive, Cmd+Backspace trash, e archives the
-                    // conversation, u toggles read, g toggles thread grouping.
-                    "a" if modifiers.platform && modifiers.shift => this.triage_selection(
-                        snail_core::triage::TriageAction::Archive,
-                        "Archived",
-                        window,
-                        cx,
-                    ),
-                    "backspace" if modifiers.platform => this.triage_selection(
-                        snail_core::triage::TriageAction::Trash,
-                        "Trashed",
-                        window,
-                        cx,
-                    ),
-                    "e" => this.archive_thread(window, cx),
-                    "u" => this.toggle_read(window, cx),
-                    // Move the selection to another mailbox (E8.4).
-                    "m" => this.open_move_picker(cx),
-                    "g" => {
-                        this.group_threads = !this.group_threads;
-                        this.reload(window, cx);
-                    }
-                    // Escape clears an active search and restores the mailbox list (E9.6). When the
-                    // box has focus the input consumes Escape and clears itself instead.
-                    "escape" if this.search.is_some() => this.clear_search(window, cx),
-                    _ => return,
+                if this.execute_command(action.0, window, cx) {
+                    cx.stop_propagation();
                 }
-                cx.notify();
             }))
-            .child(Self::titlebar(palette, window, cx))
-            .child(
-                div()
+            .child(self.titlebar(palette, window, cx))
+            .child(match self.workspace {
+                WorkspaceMode::Calendar => {
+                    div().flex().flex_1().min_h_0().child(self.calendar.clone())
+                }
+                WorkspaceMode::Settings => div()
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.sidebar(palette, cx))
-                    .child(self.list(palette, cx))
-                    .child(self.reading_pane(palette, cx)),
-            )
+                    .child(self.settings_workspace.clone()),
+                WorkspaceMode::Mail => match onboarding {
+                    Some(onboarding) => div().flex().flex_1().min_h_0().child(onboarding),
+                    None => div()
+                        .flex()
+                        .flex_1()
+                        .min_h_0()
+                        .child(self.sidebar(palette, cx))
+                        .child(self.list(palette, cx))
+                        .child(self.reading_pane(palette, cx)),
+                },
+            })
             .when_some(overlay, |this, overlay| this.child(overlay))
+            .when_some(fallback_menu, |this, menu| this.child(menu))
             .when_some(undo, |this, (label, has_ops)| {
                 this.child(
                     div()
@@ -2153,5 +3272,6 @@ impl Render for Shell {
                 )
             })
             .when_some(move_picker, |this, picker| this.child(picker))
+            .when_some(command_palette, |this, palette| this.child(palette))
     }
 }

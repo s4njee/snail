@@ -487,7 +487,7 @@ boundary, and how a nested `<table>` lays out. GPUI compiles slowly; none of tha
 ## 3. Epics and stories
 
 Story format: `[ ] N.n — story`. Epics are ordered by dependency, not by priority. **E0–E7 make a
-mail client you can live in; E8–E11 make it good; E12–E15 add the calendar; E16–E20 make it
+mail client you can live in; E8–E11 make it good; E12–E15 add the calendar; E16–E19 make it
 shippable to one person on three machines.**
 
 Every story that touches a pane, a row or a glyph is checked against the handoff values in §1.3.
@@ -765,11 +765,19 @@ Remaining: applying history records incrementally to the store (4.7), the IMAP c
       **Scope the backfill to the last 30 days** (owner, 2026-09-21; §8 open question 3) — a
       669,873-message mailbox makes a full pull a ~37-hour floor (§6.5) — with older mail fetched on
       demand. Head-first ordering still applies within the window.
-- [x] 4.3 — Fetch bodies as **`threads.get?format=raw`** and store the original RFC822 bytes.
-      Rationale: 40 units per thread beats 20 × N messages at 3+ messages per thread; byte fidelity
-      is required for PGP signature verification (E10) and for round-tripping; and it makes
-      `messages.attachments.get` unnecessary because the attachment bytes are already in the MIME
-      we hold. Parse locally with `mail-parser`.
+- [x] 4.3 — Fetch bodies as **`messages.get?format=raw`** (20 units) and store the original
+      RFC822 bytes. The same response carries `threadId` and `labelIds`, so no separate metadata
+      call is needed. Byte fidelity is required for PGP signature verification (E10) and for
+      round-tripping, and it makes `messages.attachments.get` unnecessary because the attachment
+      bytes are already in the MIME we hold. Parse locally with `mail-parser`. Fetches run four at
+      a time behind a client-side quota limiter at 90% of the per-user budget (§6.5, 4.8).
+      *Corrected 2026-09-21:* an earlier version of this story said to use
+      `threads.get?format=raw` at 40 units per thread. **`threads.get` has no raw format** — its
+      formats are `full`, `metadata` and `minimal` (checked against the API reference) — and
+      `full` returns a parsed payload with attachments as IDs, not the original bytes. Rebuilding
+      MIME from it would break PGP verification and byte-exact round-tripping, so per-thread
+      fetching is rejected (owner, 2026-09-21). At ~270 messages/min the 30-day, 2,000-message
+      first sync takes about 7–8 minutes in the background.
 - [x] 4.4 — Incremental sync via `history.list` (2 units per page, so idle polling is essentially
       free). **Cursor discipline, which is where this goes wrong:** page through the whole chain,
       commit only after the last page, and prefer `max(History.id)` actually processed, falling back
@@ -1123,15 +1131,21 @@ dispatches for real (7.12). Outstanding: iCloud's SMTP send — the other half o
 *In v1 at the owner's request. Deliberately placed after the mail client works, because it is
 orthogonal and its failure modes must never block reading ordinary mail.*
 
-- [ ] 10.1 — Key handling: import existing secret and public keys from disk, list them, show
+- [x] 10.1 — Key handling: import existing secret and public keys from disk, list them, show
       fingerprints and expiry. **No key generation in v1** unless E10.2 is cheap — importing the
-      key you already have is the real use case.
-- [ ] 10.2 — Passphrase handling: prompt per session by default, optional keychain storage (E2.8),
-      never written to disk in the clear, and zeroized after use.
-- [ ] 10.3 — Verify signatures on inbound mail: PGP/MIME (`multipart/signed`,
+      key you already have is the real use case. *(Done: the OpenPGP key manager imports armored
+      or binary public/secret keys, lists identity, fingerprint, kind, expiry, and revocation, and
+      deliberately offers no generation path.)*
+- [x] 10.2 — Passphrase handling: prompt per session by default, optional keychain storage (E2.8),
+      never written to disk in the clear, and zeroized after use. *(Done: passphrases live in
+      `Zeroizing` session memory, can be remembered only through the OS secret store, and have no
+      plaintext-file fallback.)*
+- [x] 10.3 — Verify signatures on inbound mail: PGP/MIME (`multipart/signed`,
       `application/pgp-signature`) and inline-PGP. A verified/unverified/failed indicator in the
-      reading pane, designed as part of E1.9 since no handoff has one.
-- [ ] 10.3b — **The certificate-semantics layer (§1.6).** rpgp gives cryptographic validity and
+      reading pane, designed as part of E1.9 since no handoff has one. *(Done: both forms are
+      parsed and verified off-thread, with valid, unverified, failed, and policy-rejected reading
+      states.)*
+- [x] 10.3b — **The certificate-semantics layer (§1.6).** rpgp gives cryptographic validity and
       stops there, so this story supplies what a mail client actually means by "valid signature":
       the signing key is not **expired**, not **revoked** (directly or via its primary), carries the
       **signing key flag**, and the binding signature chain back to the primary key checks out; plus
@@ -1140,12 +1154,16 @@ orthogonal and its failure modes must never block reading ordinary mail.*
       deliberately bad certificates** — revoked key, expired subkey, encryption-only subkey used to
       sign, SHA-1 signature — and assert each is reported as *invalid*, because every one of these
       is a real vulnerability if it silently passes. A "cryptographically valid but policy-rejected"
-      signature is its own UI state, distinct from both valid and forged.
-- [ ] 10.4 — Decrypt inbound `multipart/encrypted` and inline-PGP messages on the background
+      signature is its own UI state, distinct from both valid and forged. *(Done: the policy layer
+      validates bindings, expiry, revocation, flags, and hash strength; adversarial fixtures cover
+      every named rejection and keep policy rejection distinct from forgery.)*
+- [x] 10.4 — Decrypt inbound `multipart/encrypted` and inline-PGP messages on the background
       executor, cached decrypted in memory only — **never written to the message cache or FTS
       index** (the index would otherwise leak plaintext to disk). Consequence stated plainly:
-      encrypted mail is not searchable by body. That is the correct trade.
-- [ ] 10.5 — Sign outbound: PGP/MIME `multipart/signed` per RFC 3156, with correct
+      encrypted mail is not searchable by body. That is the correct trade. *(Done: decryption runs
+      in background work and yields a non-cloneable, zeroizing in-memory plaintext; a regression
+      test proves ciphertext processing cannot populate parsed/searchable plaintext.)*
+- [x] 10.5 — Sign outbound: PGP/MIME `multipart/signed` per RFC 3156, with correct
       canonicalization — CRLF line endings, trailing-whitespace handling, the boundary and the
       `protocol="application/pgp-signature"` parameter. **No crate does this for either library**
       (§1.6), so it is ours, and it is the part every implementation gets wrong first.
@@ -1153,12 +1171,18 @@ orthogonal and its failure modes must never block reading ordinary mail.*
       **Delta Chat's `src/mimefactory.rs` is the one production RFC 3156 implementation on current
       rpgp** — in-tree application code rather than a library, but the reference worth reading.
       (`mml-lib` does implement RFC 3156, but its rpgp path is pinned to 0.10 from 2023: no v6, no
-      SEIPDv2, and missing both 2024 CVE fixes. Not usable.)
-- [ ] 10.6 — Encrypt outbound to recipients whose public keys are known; clear UI for "can't
-      encrypt, key missing for X" *before* Send, not after.
-- [ ] 10.7 — Key discovery: local keyring, keys attached to received mail, and WKD lookup. **No
-      keyserver by default** (it leaks the social graph); an explicit opt-in per lookup.
-- [ ] 10.7b — **WKD, written here, and written correctly.** rpgp has no WKD and has never been
+      SEIPDv2, and missing both 2024 CVE fixes. Not usable.) *(Done: outbound signing implements the
+      RFC 3156 envelope and canonicalization, with GnuPG/Thunderbird fixtures parsed and rebuilt in
+      both directions.)*
+- [x] 10.6 — Encrypt outbound to recipients whose public keys are known; clear UI for "can't
+      encrypt, key missing for X" *before* Send, not after. *(Done: compose preflights recipient
+      keys asynchronously, disables the send path while preparing, and names every missing key
+      before anything enters the queue.)*
+- [x] 10.7 — Key discovery: local keyring, keys attached to received mail, and WKD lookup. **No
+      keyserver by default** (it leaks the social graph); an explicit opt-in per lookup. *(Done:
+      local and attached keys are validated/imported automatically, the key manager exposes WKD,
+      and keyserver lookup requires a true per-call opt-in.)*
+- [x] 10.7b — **WKD, written here, and written correctly.** rpgp has no WKD and has never been
       asked for it; the de-facto implementation is `sequoia-net`, which is LGPL and drags in OpenSSL
       via `hickory-resolver`, reintroducing exactly the C dependency §1.6 exists to avoid. So this
       is ours — about 250 lines. Write it **from the spec, not by copying the LGPL source.**
@@ -1180,72 +1204,82 @@ orthogonal and its failure modes must never block reading ordinary mail.*
       Also: cap the response size, follow redirects with a bounded limit, and note that WKD is
       **still only an Internet-Draft** after 22 revisions and ~10 years (`-22`, 2026-07-22), with a
       2026 IETF early review of "Not ready". Treat it as a useful convention, not a stable standard,
-      and never as an authoritative trust signal on its own.
-- [ ] 10.8b — Two rpgp API sharp edges, fixed once in a wrapper so no call site meets them:
+      and never as an authoritative trust signal on its own. *(Done: the in-tree WKD implementation
+      has draft-vector tests, DNS-existence-only fallback, HTTPS-only bounded redirects, response
+      and timeout caps, and treats discovery as convenience rather than trust.)*
+- [x] 10.8b — Two rpgp API sharp edges, fixed once in a wrapper so no call site meets them:
       `Message::verify()` **errors if the message has not been read to the end**, so verification
       must follow a full read; and `verify_nested()` returns a `VerificationResult::Invalid`
       **rather than an error** when a signature does not match — a silent failure that reads exactly
       like success if you only check the `Result`. Also: **never enable rpgp's `asm` feature** — it
       is the single path that pulls `cc` and a C toolchain, defeating the reason §1.6 chose this
-      library. A `#[test]` asserting the built feature set catches that.
-- [ ] 10.9 — **Security-watch chore, because tooling will not do it for you.** `cargo audit` and
+      library. A `#[test]` asserting the built feature set catches that. *(Done: the wrapper fully
+      consumes input and explicitly rejects `VerificationResult::Invalid`; the feature test checks
+      the exact pin, disabled defaults/asm, and absence of a `cc` edge under `pgp`.)*
+- [x] 10.9 — **Security-watch chore, because tooling will not do it for you.** `cargo audit` and
       `cargo deny` run in CI, but §1.6 records that RustSec carries only one of rpgp's six
       advisories and that the currently-unpatched one is in no public database. So: subscribe to
       the repo's own security-advisories page, pin `pgp` exactly, and re-check on every upgrade.
       Mirror rpgp's own `deny.toml` ignores (RUSTSEC-2023-0071, the `rsa` Marvin attack) explicitly
       and **with a comment saying why**, rather than letting them sit as unexplained suppressions.
-- [ ] 10.10 — Bound the decompression path ourselves rather than waiting for the unpatched
+      *(Done: CI runs audit and deny, `pgp` is pinned exactly, ignores are narrowly documented, and
+      the security-watch runbook records the required repository subscription and upgrade review.)*
+- [x] 10.10 — Bound the decompression path ourselves rather than waiting for the unpatched
       advisory: cap decompressed size and nesting depth on inbound PGP, well below rpgp's 1 GiB
-      default, and treat exceeding it as a malformed message.
-- [ ] 10.8 — Crypto never touches the UI thread, and a malformed or hostile PGP payload degrades to
+      default, and treat exceeding it as a malformed message. *(Done: encrypted input, decompressed
+      output, and packet nesting have independent conservative caps and fail as malformed input.)*
+- [x] 10.8 — Crypto never touches the UI thread, and a malformed or hostile PGP payload degrades to
       "could not decrypt" rather than hanging or crashing. **Parse untrusted PGP behind a
       catch-unwind boundary** — this is not defensive paranoia, it is a documented, still-live bug
-      class in both candidate libraries (§1.6). Fuzz the parsing path (E17.5).
+      class in both candidate libraries (§1.6). Fuzz the parsing path (E17.5). *(Done: every UI
+      crypto entry runs on the background executor, parser/decrypter panics are contained, hostile
+      input becomes a failure state, and the libFuzzer target exercises MIME, key, and message
+      parsers.)*
 
 ### E11 — Calendar sync
 *Same shape as E4: two providers, one `CalendarProvider` trait, no view ever knows which is which.*
 
 **Google Calendar:**
-- [ ] 11.1 — `calendarList.list` with its own sync token to discover calendars, colours, `selected`
+- [x] 11.1 — `calendarList.list` with its own sync token to discover calendars, colours, `selected`
       and `accessRole`. Note that `calendarList` is the user's *subscription* list with per-user
       presentation state, distinct from the underlying calendar — a calendar removed from it still
       exists, so do not delete its events on that signal alone.
-- [ ] 11.2 — Per-calendar `events.list` with a **per-calendar `syncToken`**. Sync tokens are
+- [x] 11.2 — Per-calendar `events.list` with a **per-calendar `syncToken`**. Sync tokens are
       per-collection; there is no single account-wide cursor.
-- [ ] 11.3 — **`nextSyncToken` appears only on the very last page.** Intermediate pages carry only
+- [x] 11.3 — **`nextSyncToken` appears only on the very last page.** Intermediate pages carry only
       `nextPageToken`. Commit the token once, at the end — the same cursor discipline as E4.4.
-- [ ] 11.4 — **Sync masters, not instances: `singleEvents=false`, and expand RRULE locally.** This
+- [x] 11.4 — **Sync masters, not instances: `singleEvents=false`, and expand RRULE locally.** This
       is the load-bearing decision of the epic. `timeMin`/`timeMax` are *forbidden* alongside a
       `syncToken`, so `singleEvents=true` would mean an unbounded expansion — an open-ended weekly
       meeting expands forever, with no horizon to stop at. Syncing masters keeps pagination bounded
       by real event count, and local expansion (E13.4) gives offline range queries for free.
-- [ ] 11.5 — Keep **every** query parameter identical between the initial and incremental requests.
+- [x] 11.5 — Keep **every** query parameter identical between the initial and incremental requests.
       The forbidden-with-`syncToken` set is exactly `iCalUID`, `orderBy`, `privateExtendedProperty`,
       `q`, `sharedExtendedProperty`, `timeMin`, `timeMax`, `updatedMin`, and `showDeleted` cannot
       be false. Violating any of these is a 400. Sort locally, since `orderBy` is unavailable.
-- [ ] 11.6 — Deletions arrive as `status: "cancelled"`, and the two kinds must not be conflated:
+- [x] 11.6 — Deletions arrive as `status: "cancelled"`, and the two kinds must not be conflated:
       a cancelled *exception of an uncancelled recurring event* means "hide this instance"; any
       other cancelled event means "the event was deleted, remove your copy." Getting this backwards
       either leaves deleted events on screen or wipes live series. Cancelled exceptions are only
       guaranteed to carry `id`, `recurringEventId` and `originalStartTime`, so the deserializer
       must tolerate a nearly empty event.
-- [ ] 11.7 — **410 `fullSyncRequired` is routine, not an error.** Google documents no TTL for sync
+- [x] 11.7 — **410 `fullSyncRequired` is routine, not an error.** Google documents no TTL for sync
       tokens and invalidates them for reasons including ACL changes on any subscribed calendar, so
       a sharing change can force a resync at any moment. Wipe that calendar's events and re-sync
       it — that calendar only, not the account.
-- [ ] 11.8 — Key on `recurringEventId` + `originalStartTime` for instances, never on start time —
+- [x] 11.8 — Key on `recurringEventId` + `originalStartTime` for instances, never on start time —
       `originalStartTime` is explicitly the stable identity "even if the instance was moved."
       Persist `iCalUID` too as the cross-system dedupe key against CalDAV.
-- [ ] 11.9 — Do **not** use the `updated` field as a change detector: Google states that updating
+- [x] 11.9 — Do **not** use the `updated` field as a change detector: Google states that updating
       an event's reminders does not change it.
-- [ ] 11.10 — No `events.watch`. Calendar push requires an HTTPS endpoint with a CA-signed
+- [x] 11.10 — No `events.watch`. Calendar push requires an HTTPS endpoint with a CA-signed
       certificate and has no pull alternative — strictly unusable without a server. Poll.
-- [ ] 11.11 — Calendar quota is counted in **requests**, not Gmail's weighted units: 600/min/user,
+- [x] 11.11 — Calendar quota is counted in **requests**, not Gmail's weighted units: 600/min/user,
       10,000/min/project, 1,000,000/day/project. A sync-token poll is one request per calendar, so
       cadence × calendar count is the thing to watch.
 
 **iCloud CalDAV:**
-- [ ] 11.12 — Discovery: `/.well-known/caldav` → `current-user-principal` → `calendar-home-set` →
+- [x] 11.12 — Discovery: `/.well-known/caldav` → `current-user-principal` → `calendar-home-set` →
       PROPFIND Depth:1 for `displayname`, `resourcetype`, `supported-calendar-component-set`,
       `getctag`, `calendar-color`, `current-user-privilege-set`. Two iCloud-specific traps:
       **(a) do not validate that the response path matches the request path** — iCloud answers
@@ -1253,39 +1287,39 @@ orthogonal and its failure modes must never block reading ordinary mail.*
       reject it; **(b) follow the 301/302 redirect onto the sharded host
       `pNN-caldav.icloud.com`** and keep talking to it, but re-resolve from `caldav.icloud.com` on
       any unexpected 404 rather than persisting the shard hostname forever.
-- [ ] 11.13 — **Implement both sync paths and probe which to use.** Whether iCloud supports RFC 6578
+- [x] 11.13 — **Implement both sync paths and probe which to use.** Whether iCloud supports RFC 6578
       `sync-collection` is genuinely unestablished — `libdav` (the only credible CalDAV client crate,
       ISC) detects the capability but **does not implement incremental sync at all**, so this is our
       code either way. Read `DAV:supported-report-set` per collection at setup: use `sync-collection`
       if present; otherwise poll the cheap `getctag` PROPFIND per collection and, on a change, diff
       an etag listing and fetch with `calendar-multiget`. **A ten-minute live test settles this —
       do it in E0.4.**
-- [ ] 11.14 — **Never synthesize resource hrefs from UIDs.** Any collection another client has
+- [x] 11.14 — **Never synthesize resource hrefs from UIDs.** Any collection another client has
       written contains resources whose filename ≠ the VEVENT UID; constructing the URL from the UID
       addresses a non-existent resource, the ETag comes back empty, `If-Match` is omitted, and
       lost-update protection silently fails. Always use the href the server gave you. Also filter
       the collection's own href out of multistatus responses — iCloud includes it, and naive
       parsers treat it as an extra event.
-- [ ] 11.15 — Never assume the object you wrote is the object stored: Apple's server normalizes
+- [x] 11.15 — Never assume the object you wrote is the object stored: Apple's server normalizes
       uploaded iCalendar data and, when it does, returns **no ETag** on the PUT. Follow with a GET
       to obtain the canonical object and its real ETag. Change detection compares server state to
       last-known-server state, never to our own serialization.
-- [ ] 11.16 — Bounded time-range queries: inherited CalendarServer behaviour rejects far-past and
+- [x] 11.16 — Bounded time-range queries: inherited CalendarServer behaviour rejects far-past and
       far-future ranges with **403 max-date-time**, which breaks naive "sync everything" loops.
-- [ ] 11.17 — Rate limiting: iCloud returns **503 "Rate Limit Exceeded"** with no published
+- [x] 11.17 — Rate limiting: iCloud returns **503 "Rate Limit Exceeded"** with no published
       thresholds and no way to request an increase. Treat 403/429/503 as transient with exponential
       backoff and honour `Retry-After`; treat **401 as credential-revoked** (almost always the
       app-specific password died with a password change, per E3.4).
-- [ ] 11.18 — No push. Neither DAVx⁵, vdirsyncer nor Thunderbird uses push against iCloud, and the
+- [x] 11.18 — No push. Neither DAVx⁵, vdirsyncer nor Thunderbird uses push against iCloud, and the
       APNs transport needs an Apple-issued certificate that a cross-platform client cannot have.
       Poll `getctag`, which is one cheap PROPFIND per collection.
-- [ ] 11.19 — Calendar creation is awkward on iCloud (minimum name lengths, and calendars created
+- [x] 11.19 — Calendar creation is awkward on iCloud (minimum name lengths, and calendars created
       by third-party clients can behave oddly). v1 **reads and writes events in existing calendars
       and does not create calendars**; the user makes them in Apple's UI. Stated as a limit, not a
       bug.
 
 **Both:**
-- [ ] 11.20 — iCalendar parsing with **`calcard`** (Apache-2.0/MIT, actively maintained). Chosen
+- [x] 11.20 — iCalendar parsing with **`calcard`** (Apache-2.0/MIT, actively maintained). Chosen
       over `icalendar` + `rrule` for one decisive reason: it is the only Rust crate that handles
       **VTIMEZONE properly** — it has a real `TzResolver` that reads VTIMEZONE components and
       resolves `TZID`, *and* a Windows/Exchange TZID → IANA mapping table ("Pacific Standard Time"
@@ -1293,90 +1327,108 @@ orthogonal and its failure modes must never block reading ordinary mail.*
       as an unresolved string; `rrule` has had no commit in 17 months. Real calendars are full of
       Exchange-originated invitations, so this is not a theoretical concern. Cost: `calcard` is
       0.3.x and moving fast — pin exactly, like gpui-kit.
-- [ ] 11.21 — Write path: local edit → optimistic store write → `pending_op` → provider. Google
+- [x] 11.21 — Write path: local edit → optimistic store write → `pending_op` → provider. Google
       takes a patch; CalDAV takes a whole-object PUT with `If-Match` on the etag, and a 412 means
       someone else won — refetch, and surface a real conflict rather than clobbering.
-- [ ] 11.22 — Poll cadence with jitter (Google's docs explicitly call a synchronized-midnight full
+- [x] 11.22 — Poll cadence with jitter (Google's docs explicitly call a synchronized-midnight full
       sync "a common bad practice" and suggest ±25%), 5–15 min foregrounded, much slower on battery.
+
+**Implemented 2026-09-21:** provider-neutral calendar models and SQLite cursors live in
+`snail-core`; Google Calendar and iCloud CalDAV both discover, incrementally pull, and write through
+the shared `CalendarProvider` boundary. Google paging exposes only terminal sync tokens and handles
+cancelled exceptions/collection-local 410s. CalDAV uses the live-verified RFC 6578 path with the
+ctag/etag/multiget fallback, exact server hrefs, authenticated HTTPS shard redirects, canonical GET
+after an ETag-less PUT, bounded queries, and retry/auth classification. `calcard =0.3.14` is pinned
+without default features and verified with Exchange/Windows VTIMEZONE data. Optimistic writes,
+persisted conflicts, ±25% polling jitter, and slower battery cadence are wired into the background
+sync loop. The E0.4 live result remains the credentialed iCloud capability proof; deterministic
+unit/integration coverage runs in the workspace suite and the ten-minute live probe remains ignored
+unless its credential environment is supplied.
 
 ### E12 — Calendar views
 *Calendar handoff screens 01–05, restated in the mail design language per §1.3. All geometry
 survives; only colour, type and radius change.*
 
-- [ ] 12.1 — Grid geometry in `snail-ui`, pure and unit-tested, because this is where calendars
+- [x] 12.1 — Grid geometry in `snail-ui`, pure and unit-tested, because this is where calendars
       actually go wrong: month cell → date mapping across a 6×7 grid and month boundaries; time-grid
       `top = (start_hour − 7) × pitch` and `height = duration × pitch − gap` at the three pitches
       (45 / 47 / 49px); all-day band assignment; agenda day grouping. Tested against DST
       transitions in both directions and across the year boundary.
-- [ ] 12.2 — **Overlapping events**, undesigned in the handoff because the sample data never
+- [x] 12.2 — **Overlapping events**, undesigned in the handoff because the sample data never
       overlaps. Column-packing algorithm (group overlapping events, assign columns, width =
       pane/columns) in `snail-ui` with fixtures for the cases that break naive implementations:
       three-way overlap, an all-day-length event beside short ones, and events that only touch at
       an endpoint (which must *not* count as overlapping).
-- [ ] 12.3 — Month view, built on Taffy's **CSS Grid** support (§1.2) rather than nested flex:
+- [x] 12.3 — Month view, built on Taffy's **CSS Grid** support (§1.2) rather than nested flex:
       88px header (title 42/500/-0.03em + year in DM Mono + week number +
       calendar count + date stepper), 30px weekday strip, 6×7 grid. Date pill states (today =
       solid accent; normal; out-of-month), day tags, max 3 event chips then "+N more".
-- [ ] 12.4 — Week view: 78px header, 52px column header, 40px all-day band, 15 hour rows at 45px.
+- [x] 12.4 — Week view: 78px header, 52px column header, 40px all-day band, 15 hour rows at 45px.
       Today column washed and accent-coloured. All-day chips in the band.
-- [ ] 12.5 — 3-day and Day views: the same engine at 47px and 49px pitch, with the Day view's
+- [x] 12.5 — 3-day and Day views: the same engine at 47px and 49px pitch, with the Day view's
       300px right rail (DUE TODAY / REMINDERS / REPEATS sections, dashed "Add to this day" footer).
       Note the handoff's own inconsistency — the Day now-line is hardcoded at 301px while week and
       3-day derive theirs from 13:40. **Derive all three from one clock.**
-- [ ] 12.6 — Now-line: 1.5px accent rule with an 8px dot, plus the 3-day view's time flag. Updated
+- [x] 12.6 — Now-line: 1.5px accent rule with an 8px dot, plus the 3-day view's time flag. Updated
       on the minute boundary via `cx.notify()` + `cx.on_next_frame` called *from* render (§1.2) —
       never `request_animation_frame` from a callback, and never a 60 Hz timer for something that
       moves once a minute.
-- [ ] 12.7 — Agenda view: 78px header, day groups with a 132px date block, zebra rows, and the
+- [x] 12.7 — Agenda view: 78px header, day groups with a 132px date block, zebra rows, and the
       events/events+tasks segmented control.
-- [ ] 12.8 — Scrolling and virtualization, absent from the handoff (grids are cropped 07:00–21:00
+- [x] 12.8 — Scrolling and virtualization, absent from the handoff (grids are cropped 07:00–21:00
       in the mock): time grids scroll the full 24 hours and **open scrolled to the current hour**;
       the agenda virtualizes over an effectively unbounded date range in both directions.
-- [ ] 12.9 — Range loading: fetch expanded occurrences for the visible range **plus one range of
+- [x] 12.9 — Range loading: fetch expanded occurrences for the visible range **plus one range of
       buffer each side** (handoff instruction), on the background executor with a generation guard.
-- [ ] 12.10 — Mini-month in the sidebar: 6×7 grid at 27px, out-of-month / in-month / selected
+- [x] 12.10 — Mini-month in the sidebar: 6×7 grid at 27px, out-of-month / in-month / selected
       (`#e2eaf7`) / today (solid `#2c5fb8`) states, month arrows.
-- [ ] 12.11 — Calendar list in the sidebar with per-calendar swatch, name, event count, and
+- [x] 12.11 — Calendar list in the sidebar with per-calendar swatch, name, event count, and
       visibility toggle; toggling drops the calendar out of every view immediately.
-- [ ] 12.12 — View switching (Month / Week / 3-day / Day / Agenda) via the titlebar segmented
+- [x] 12.12 — View switching (Month / Week / 3-day / Day / Agenda) via the titlebar segmented
       control, the date stepper (‹ / Today / ›) and the mini-month, all driving one `focusedDate`.
-- [ ] 12.13 — **Timezones.** The handoff has no timezone UI at all, but `tz` is on its Event entity
+- [x] 12.13 — **Timezones.** The handoff has no timezone UI at all, but `tz` is on its Event entity
       and a calendar that gets this wrong is worthless. Events store an IANA zone; the grid renders
       in the local zone; an event in a different zone shows its original time as secondary text.
       Fixtures for: an event created in another zone, a DST-spanning recurring event, and a
       floating all-day event.
-- [ ] 12.14 — Drag to create, drag to move, and edge-resize on the time grids — all undesigned, all
+- [x] 12.14 — Drag to create, drag to move, and edge-resize on the time grids — all undesigned, all
       expected. Typed `on_drag` payloads with snap-to-15-minutes and a live preview block.
+
+Implemented 2026-09-21: shipped all five calendar views, shared range/timezone/recurrence model,
+buffered background loading, sidebar controls, minute-accurate now indicators, virtualized agenda,
+and typed 15-minute drag interactions. Visual QA also aligned the calendar hierarchy with the design
+reference: only the month heading is strongly bold, dates use regular weight, and adjacent-month
+dates use medium grey.
 
 ### E13 — Event editor, recurrence and reminders
 *Calendar handoff screen 06: a 576px sheet over a dimmed view, scrim inset below the titlebar.*
 
-- [ ] 13.1 — The sheet: head (kicker, title field with the accent underline focus state), body
+- [x] 13.1 — The sheet: head (kicker, title field with the accent underline focus state), body
       (92px label column + controls), foot (Delete / Cancel / Save with ⌘↵). Scrim
       `rgba(0,0,0,.34)` inset `52px 0 0 0` so the titlebar stays live.
-- [ ] 13.2 — Fields: title, when (date + time + all-day toggle), calendar picker, location,
+- [x] 13.2 — Fields: title, when (date + time + all-day toggle), calendar picker, location,
       repeat, reminders, notes (Newsreader per §1.3). Built on gpui-kit `Input`, so gated on E0.2 —
       and note gpui-kit also ships `DatePicker` and `Calendar` components, which may serve the date
       field and the sidebar mini-month (E12.10) directly. Evaluate before hand-rolling either.
-- [ ] 13.3 — Recurrence UI: frequency dropdown, weekly day multi-select (the 34×30 buttons),
+- [x] 13.3 — Recurrence UI: frequency dropdown, weekly day multi-select (the 34×30 buttons),
       end-date field, and the **live occurrence count** ("54 occurrences") — which means the
       expander must run on every edit, fast.
-- [ ] 13.4 — RFC 5545 recurrence expansion in `snail-core`, the single most test-worthy piece of
+- [x] 13.4 — RFC 5545 recurrence expansion in `snail-core`, the single most test-worthy piece of
       the calendar. RRULE/RDATE/EXDATE, `COUNT` vs `UNTIL`, `BYDAY`/`BYMONTHDAY`/`BYSETPOS`,
       DST-crossing series, and exception instances that were moved rather than cancelled.
       **Google forbids `DTSTART`/`DTEND` inside its `recurrence[]` field** (§6), so the expander
       takes DTSTART separately — a real gotcha if an off-the-shelf crate expects them inline.
-- [ ] 13.5 — Edit and delete **scope: this / this-and-future / all** — the handoff calls for it and
+- [x] 13.5 — Edit and delete **scope: this / this-and-future / all** — the handoff calls for it and
       it is where correctness lives. "This" creates an exception; "this and future" splits the
       series with a new master; "all" edits the master. Fixture-tested against what Google and
       CalDAV each actually do with the result.
-- [ ] 13.6 — Reminders: multiple per event, relative ("10 min before") and absolute ("at 08:00
+- [x] 13.6 — Reminders: multiple per event, relative ("10 min before") and absolute ("at 08:00
       same day"), as removable chips plus a dashed add button.
-- [ ] 13.7 — **Reminders fire from the backend**, per the handoff, so they work with the window
+- [x] 13.7 — **Reminders fire from the backend**, per the handoff, so they work with the window
       closed — a scheduler in `snail-services` holding the next N due reminders, resilient to
       sleep/wake (a laptop that was closed through a reminder should fire it late, once, not
       silently drop it or fire twenty).
-- [ ] 13.8 — Attendees and RSVP. **Not in either handoff** — the calendar handoff explicitly has no
+- [x] 13.8 — Attendees and RSVP. **Not in either handoff** — the calendar handoff explicitly has no
       attendee UI — but an invite you cannot answer makes the calendar read-only in practice, and
       invites arrive as mail, which Snail already has. Scoped as: show attendee list and status,
       accept/decline/maybe from both the event and the mail message. Needs a design pass first.
@@ -1386,58 +1438,86 @@ survives; only colour, type and radius change.*
       `ATTENDEE` properties is PUT — **double-sending invitations, once server-side and once by us,
       is the bad failure mode here.** A client-side iMIP fallback (what Thunderbird does) is the
       answer if the server does not schedule.
-- [ ] 13.9 — Tasks: the sidebar TASKS section and Day rail cards, with open / overdue / done
+- [x] 13.9 — Tasks: the sidebar TASKS section and Day rail cards, with open / overdue / done
       states, inline add, and due dates. **Local-only, and this is now a finding rather than a
       choice: Apple disabled Reminders sync over CalDAV** — modern iCloud Reminders ride a private
       protocol, and third-party clients cannot reach them at all. Google Tasks has its own separate
       API, out of v1 scope. So Snail's tasks are its own, stored locally, and the UI must not imply
       they sync anywhere.
 
+Implemented 2026-09-21: added the complete 576px event sheet, fast live recurrence previews and
+scope-aware series mutations; persisted attendees, multi-reminders and local tasks; added an
+app-lifetime durable reminder scheduler with sleep/wake catch-up; and connected RSVP controls in
+both mail and calendar. CalDAV discovery persists RFC 6638 capability, so server scheduling is used
+only when advertised; otherwise Snail emits one client-side iMIP REPLY through the mail outbox.
+Visual QA covered new and recurring event flows, relative and same-day reminder chips, keyboard
+save, scoped editing, task add/complete, Day rail rendering and the Agenda task mode.
+
 ### E14 — Settings and accounts
 
-- [ ] 14.1 — Settings surface. The two handoffs disagree: mail uses a 620×600 window with three
+- [x] 14.1 — Settings surface. The two handoffs disagree: mail uses a 620×600 window with three
       flat sections and no tabs; the calendar uses an in-window 236px nav with seven panes. **Take
       the calendar's in-window nav** (it scales, and a separate window is one more thing to manage)
       with the mail handoff's card-and-row visual treatment.
-- [ ] 14.2 — Accounts pane: the calendar handoff's account cards — avatar with initials, name,
+- [x] 14.2 — Accounts pane: the calendar handoff's account cards — avatar with initials, name,
       detail line, status dot (synced `#0F766E` / syncing `#A16207` / offline `#8a837b` / error
       `#C2410C`), "Sync now", and per-calendar/per-mailbox toggle pills.
-- [ ] 14.3 — Add-account flow: pick Google or iCloud, run the right auth path (E3), discover
+- [x] 14.3 — Add-account flow: pick Google or iCloud, run the right auth path (E3), discover
       mailboxes and calendars, and let the user choose what syncs before the first full pull.
-- [ ] 14.4 — General pane: the mail handoff's four rows — check interval, load remote images (off,
+- [x] 14.4 — General pane: the mail handoff's four rows — check interval, load remote images (off,
       with the privacy helper text), group by thread, undo-send window — plus the calendar's sync
       cadence (5 / 15 / 60 / manual) unified into one interval control per account.
-- [ ] 14.5 — Signature pane, serif per the handoff, per account.
-- [ ] 14.6 — PGP pane: keys, passphrase policy, default sign/encrypt behaviour, WKD opt-in.
-- [ ] 14.7 — Keyboard pane listing every command and its binding, generated from the command table
+- [x] 14.5 — Signature pane, serif per the handoff, per account.
+- [x] 14.6 — PGP pane: keys, passphrase policy, default sign/encrypt behaviour, WKD opt-in.
+- [x] 14.7 — Keyboard pane listing every command and its binding, generated from the command table
       (E15) so it cannot drift.
-- [ ] 14.8 — Advanced pane: store size and location, clear cache, re-index search, force full
+- [x] 14.8 — Advanced pane: store size and location, clear cache, re-index search, force full
       resync per account, open the log. **Force full resync is a real user-facing button**, not a
       hidden flag, because §6 guarantees it will be needed.
-- [ ] 14.9 — Account removal: delete the local store rows and cache, revoke the token where the
+- [x] 14.9 — Account removal: delete the local store rows and cache, revoke the token where the
       provider supports it, and wipe the keychain entry.
+
+Implemented 2026-09-21. Settings is an in-window seven-pane workspace with the 236px rail and the
+handoff's restrained card/row hierarchy. Account setup now gates the first pull on real Gmail label
+and Google Calendar discovery or iCloud IMAP and CalDAV discovery, then exposes per-collection
+choices and per-account cadence. Signatures are identity-scoped and inserted into new/reply drafts;
+PGP defaults and optional WKD discovery feed compose; the Keyboard pane is projected from the
+tested command catalogue; and Advanced/account removal are backed by real store, cache, token, and
+keychain operations. Native fixture QA covered every pane plus persistence and collection toggles;
+the Google OAuth entry point reached its waiting state without completing a real login. Verification:
+151 `snail-core`, 30 `snail-services`, 108 `snail-ui`, and 25 app tests pass, and the release bundle
+builds and signs successfully.
 
 ### E15 — Commands, keyboard and menus
 
-- [ ] 15.1 — Command table in `snail-ui` (id, title, default binding, menu placement, key context,
+- [x] 15.1 — Command table in `snail-ui` (id, title, default binding, menu placement, key context,
       enable guard) — GPUI-free and unit-tested, following Ferrite's pattern.
-- [ ] 15.2 — **One generic `RunCommand(CommandId)` action**, not one action type per command
+- [x] 15.2 — **One generic `RunCommand(CommandId)` action**, not one action type per command
       (§ Ferrite's actions.rs). The table projects into `Vec<KeyBinding>`, native macOS menus via
       `cx.set_menus`, and an in-window menu on Windows/Linux.
-- [ ] 15.3 — Key contexts as an enum (Global / List / Reading / Compose / Calendar / Search /
+- [x] 15.3 — Key contexts as an enum (Global / List / Reading / Compose / Calendar / Search /
       Editor) with the "don't fire while typing" guard expressed as the `!Input` context predicate.
       Critical here: a mail client is full of single-letter shortcuts that must not fire mid-compose.
-- [ ] 15.4 — The handoffs' shortcuts, honoured exactly: `↑`/`↓` selection, `⌘R` reply, `⌘⇧D` send,
+- [x] 15.4 — The handoffs' shortcuts, honoured exactly: `↑`/`↓` selection, `⌘R` reply, `⌘⇧D` send,
       `⌘⌫` trash, `⌘⇧A` archive, `⌘F` search, `⌘K` command/date search, `⌘↵` save event, `Esc`
       cancel. Platform glyphs rendered per OS.
-- [ ] 15.5 — Focus discipline: a `FocusHandle` per focusable region, and the shell takes focus at
+- [x] 15.5 — Focus discipline: a `FocusHandle` per focusable region, and the shell takes focus at
       launch and on window-focus-lost (with an open dialog winning) — otherwise GPUI dispatches
       shortcuts above the shell's handler and nothing works until you click. This exact bug is
       documented in the reference project; do not rediscover it.
-- [ ] 15.6 — A test that constructs every binding, because `KeyBinding::new` panics on an
+- [x] 15.6 — A test that constructs every binding, because `KeyBinding::new` panics on an
       unparseable keystroke and that should fail in CI, not at launch.
-- [ ] 15.7 — `⌘K` palette: commands, mailboxes, calendars, and natural-language dates ("next
+- [x] 15.7 — `⌘K` palette: commands, mailboxes, calendars, and natural-language dates ("next
       tuesday", "aug 17") parsed in `snail-ui`.
+
+Implemented as one typed, GPUI-free catalogue projected into key bindings, native macOS menus,
+the Windows/Linux in-window menu, Settings, and a command palette. Context and input predicates
+protect compose fields from single-letter shortcuts, with focus restoration and a propagated-input
+Escape bridge keeping cancellation reliable while typing. The palette searches commands,
+mailboxes, calendars, and natural-language dates. Native fixture QA covered the menu bar, palette,
+mailbox/date navigation, compose launch/cancel, and focus-safe Escape behavior. Verification: 113
+`snail-ui` and 28 app tests pass, `cargo check -p snail` passes, and the release bundle builds and
+signs successfully.
 
 ### E16 — Sync orchestration, offline and notifications
 
@@ -1492,8 +1572,8 @@ survives; only colour, type and radius change.*
 
 - [ ] 18.1 — macOS `.app` bundle with `Info.plist`, icon, and ad-hoc signing (no notarization
       needed for personal use; document what changes if that stops being true).
-- [ ] 18.2 — Windows: a plain build plus whatever minimum makes it launchable from a folder. No
-      installer for a personal tool.
+- [ ] 18.2 — Windows release gate: E19 is complete and its portable ZIP launches on a clean
+      Windows account with no developer tools installed. No installer for a personal tool.
 - [ ] 18.3 — Linux: build from source, documented in `BUILDING.md`, with the **Vulkan driver** and
       `xdg-desktop-portal` requirements stated up front as hard prerequisites (§1.2).
 - [ ] 18.4 — `BUILDING.md` with per-platform system dependencies — cribbed from Zed's own
@@ -1502,13 +1582,132 @@ survives; only colour, type and radius change.*
       startup capability probe
       (renderer, adapter, software-rendering flag, portal availability, keyring availability) shown
       in the dev overlay and in Settings → Advanced.
-- [ ] 18.5 — Full functional pass on Windows and Linux: window chrome, drawn window controls, file
-      dialogs, IME, keyboard shortcuts with `Ctrl` instead of `⌘`, notifications, keychain.
+- [ ] 18.5 — Full functional pass on Linux: window chrome, drawn window controls, file dialogs,
+      IME, keyboard shortcuts with `Ctrl` instead of `⌘`, notifications, keychain. The equivalent
+      Windows gate is E19.13 rather than a line item hidden inside this mixed-platform epic.
 - [ ] 18.6 — Fractional-scale pass at 100 / 125 / 150 / 200 %, which is where GPUI's pixel rounding
-      shows (§1.2's letter-spacing note came out of exactly this).
+      shows (§1.2's letter-spacing note came out of exactly this). Windows owns its pass in E19.7;
+      this story retains the macOS/Linux pass.
 - [ ] 18.7 — Data safety: the store survives a kill -9 mid-sync, a full disk, and a schema
       downgrade attempt. A backup/export path — at minimum, "the store is these two directories,
       copy them."
+
+### E19 — Windows port
+
+*This is a runtime port, not a cross-compile task. `windows-latest` already builds and tests the
+workspace (E0.10), the pinned GPUI snapshot has a DirectX renderer, `keyring` has a Windows
+Credential Manager backend, and `rfd` has native Windows dialogs. That is useful plumbing, but it
+does not prove that a person can use the app. As of 2026-09-21 the binary has never run on Windows;
+it does not set the app identity GPUI requires for toast notifications, release launches can show
+a console, unread badging and RSS/power sampling are no-ops, OAuth shells through `cmd /C start`,
+and settings/cache/log replacement assumes Unix rename-over-existing semantics.*
+
+**Support boundary and definition of done.** The v1 target is current Windows 11 on x86-64, built
+with the MSVC toolchain and run on a physical machine with a DirectX adapter accepted by the pinned
+GPUI backend. The deliverable is an unpack-and-run ZIP: no installer, administrator rights,
+background service, auto-start entry, registry-based file association, or auto-updater. ARM64 and
+RDP/VDI are not release gates. Windows is done only when a clean, non-developer Windows account can
+unzip Snail, connect Gmail and iCloud, restart without losing credentials or state, and complete the
+mail/calendar/PGP flows in 19.13 at every supported scale. The Windows benchmark must meet the
+Linux floors in §4 on the recorded reference machine; a green compile alone never closes a story.
+
+- [ ] 19.1 — Establish the hardware baseline before changing code. On a physical Windows 11 x64
+      machine, check out the exact lockfile, install the documented MSVC + Spectre toolchain, run
+      `cargo build --workspace --locked` and `cargo test --workspace --locked`, then launch both a
+      debug and release binary with an empty profile and the 200k-message fixture. Record Windows
+      version/build, CPU, RAM, GPU and driver, display topology/scales, failures, console output and
+      screenshots in `docs/WINDOWS.md`. This closes E0.11 and becomes the reproducible before-state.
+- [ ] 19.2 — Give the process a real Windows identity. Call `App::set_app_identity` with
+      `dev.snail.app` / `Snail` before opening a window or posting a notification; embed a Windows
+      manifest, application icon, product/file version and description in `Snail.exe`; and make the
+      packaged release a GUI-subsystem executable so double-clicking it does not flash a console.
+      Preserve the store/benchmark/import commands through an explicit console entry point (a
+      second binary or an attach/allocate-console path), rather than making useful errors invisible.
+      Taskbar grouping, toast identity and Credential Manager service naming must all stay stable
+      across upgrades.
+- [ ] 19.3 — Add `scripts/package-windows.ps1`. It builds `--release --locked` for
+      `x86_64-pc-windows-msvc`, stages only the executable plus the licence/readme material actually
+      needed at runtime, emits a versioned portable ZIP and SHA-256 checksum, and fails if an
+      unexpected DLL or loose asset is required. Run the artifact on a clean account with no Rust,
+      Visual Studio, repository checkout or inherited `SNAIL_*` environment variables. Publish the
+      ZIP from an explicit release workflow; ordinary CI keeps compiling and testing every commit.
+- [ ] 19.4 — Make disk writes genuinely Windows-safe. Introduce one tested atomic-replace helper
+      and use it for settings JSON, cache aliases and log rotation; Windows `rename` does not replace
+      an existing destination the way the current code assumes. Cover first write, overwrite,
+      existing `.log.1`, crash between temp-write and replace, antivirus/indexer contention, and
+      retry exhaustion without deleting the last good file. Validate `%APPDATA%` for config,
+      `%LOCALAPPDATA%` for cache/logs, no writes beside the executable, and paths containing spaces,
+      non-ASCII characters and a long user-profile prefix. SQLite WAL, recovery after forced
+      termination, cache cleanup and schema migration must pass on NTFS.
+- [ ] 19.5 — Prove Windows Credential Manager end to end, not just through the in-memory test
+      store. Serialize access to each credential as required by `keyring`'s Windows backend, and
+      exercise set/get/replace/delete across process restarts for Google refresh tokens, iCloud app
+      passwords and an optional PGP passphrase. Account removal deletes its credentials; a locked,
+      denied or corrupt vault produces actionable UI and never falls back to JSON/SQLite or logs a
+      secret. Test a Windows user name and credential value containing non-ASCII text.
+- [ ] 19.6 — Replace the Windows OAuth launcher with a shell-free platform opener
+      (`ShellExecuteW` or an equivalent library call); do not pass an authorization URL through
+      `cmd.exe`, where `&` and quoting have command semantics. Verify the complete PKCE loop with
+      Edge and with a non-Edge default browser: bind loopback only, open the browser, accept exactly
+      the matching state/code, return focus to Snail, handle cancel/timeout/retry, and avoid a
+      Windows Firewall prompt. The same opener must cover “Open in browser”, log-folder links and
+      attachment/file links with Unicode paths.
+- [ ] 19.7 — Finish native-feeling window chrome on Windows. Verify drag regions exclude every
+      button/input, min/max/close hit targets use `WindowControlArea`, hover/pressed states match
+      Windows conventions, maximize toggles to a restore glyph, titlebar double-click toggles
+      maximize, and hovering Max exposes Windows 11 Snap Layouts. Exercise restore/minimize,
+      Alt+F4, taskbar activation, Win+Arrow snapping, multi-monitor movement (including negative
+      coordinates), mixed-DPI monitors, sleep/wake and a lost/recreated DirectX device. Run every
+      screen at 100/125/150/200% in both themes; no clipped text, one-pixel seams, misplaced popup,
+      fuzzy icon or off-screen restored window is accepted.
+- [ ] 19.8 — Complete the Windows input and command pass. `modifiers.platform` must mean Ctrl and
+      every visible shortcut label must say `Ctrl`, while AltGr must still type characters rather
+      than trigger Ctrl+Alt commands. Test tab/focus order, arrows/page keys, Ctrl+A/C/X/V/Z/Y,
+      Ctrl+Backspace, Shift-selection, context menus, CRLF clipboard text, emoji/non-BMP text and a
+      CJK IME through search, onboarding, event editing and the multi-line composer. Native open and
+      multi-file dialogs cover OAuth JSON, PGP keys and attachments; cancellation is not an error.
+- [ ] 19.9 — Make Windows notifications and unread state real. With the identity from 19.2, verify
+      toast delivery, replacement by tag, dismissal when a message is read, reminder delivery,
+      Focus Assist behavior, and click-to-open while Snail is running or minimized. Define the
+      portable-build limit honestly: activation after the process has exited is not promised
+      without an installed COM activator. Replace the non-macOS badge no-op with a Windows taskbar
+      overlay (or record an explicit accepted parity gap), clear it at zero, and test multiple
+      windows/taskbar regrouping after Explorer restarts.
+- [ ] 19.10 — Add Windows power and lifecycle integration. Use the native AC/battery state so
+      calendar and mail polling slow on battery like the other platforms; pause nonessential work
+      during suspend, discard stale network connections on resume, nudge sync after network return,
+      and do not keep the machine awake merely because Snail is open. Exercise sleep/resume,
+      hibernate/resume, Wi-Fi loss/reconnect, clock/time-zone changes and a refresh token expiring
+      while suspended.
+- [ ] 19.11 — Fill the Windows diagnostics gaps. Sample current and peak RSS with the Windows
+      process APIs so the dev overlay and §4 budget are meaningful; report Windows build, DirectX
+      adapter/driver, scale factor, config/cache/log locations, keyring availability and packaged
+      version in Settings → Advanced. A renderer/device initialization failure must leave an
+      actionable diagnostic (and log location) rather than only GPUI's `expect` panic. Try RDP once
+      and record the actual result, but do not silently enable a software renderer or make RDP a v1
+      promise.
+- [ ] 19.12 — Harden Windows CI. Keep `cargo build/test --workspace --locked` on
+      `windows-latest`; add Windows-only regression tests for atomic replacement, Unicode paths,
+      command/shortcut projection, notification tags and package metadata; run the non-GUI CLI
+      fixture/benchmark smoke against a temporary profile; and build/inspect the portable artifact.
+      CI must catch accidental Unix-only dependencies and missing embedded resources. GUI, IME,
+      Credential Manager and DirectX acceptance stay on real hardware because a hosted runner is
+      not evidence for them.
+- [ ] 19.13 — Run the clean-machine acceptance matrix with a disposable config/cache profile:
+      first launch; Gmail OAuth; iCloud password; initial and incremental mail/calendar sync; read,
+      search, thread, archive/move/delete/undo; compose/reply/forward with Unicode and attachments;
+      offline queue and restart; HTML/open-in-browser; PGP import/sign/encrypt/decrypt; calendar
+      create/edit/delete/recurrence/reminder; theme/system-theme change; toast click; credential
+      persistence/removal; corrupt-settings recovery; and forced termination during sync. Repeat the
+      UI/input subset at all four scale factors and with a Unicode Windows account name. Log every
+      failure as a story or upstream issue, rerun after fixes, record §4 measurements in `BENCH.md`,
+      and do not close the epic with known data-loss, auth, input or rendering failures.
+- [ ] 19.14 — Finish the handoff documentation. `BUILDING.md` gets exact Visual Studio Installer
+      components and PowerShell commands; `docs/WINDOWS.md` gets install/update/uninstall (delete
+      the app folder; preserve/remove the two data roots deliberately), backup/restore locations,
+      Credential Manager and notification troubleshooting, GPU/RDP limits, log collection and the
+      dated acceptance record. Remove the Windows items from the open-questions list only after
+      that record exists.
 
 ---
 
@@ -1555,7 +1754,7 @@ is slower than that, something is wrong in our code, not in GPUI.
 | **M2 — It replaces your client** | Compose, reply, send, undo send, threading, search, both accounts. Daily-driver on macOS. | E7–E9 |
 | **M3 — It reads your week** | Calendar sync from both providers, five views, event editor, recurrence, reminders. | E11–E13 |
 | **M4 — It's yours** | PGP, settings, full keyboard, notifications, the states matrix and empty states finished. | E10, E14–E16 |
-| **M5 — Three platforms** | Budgets met on macOS and Linux, Windows functional, packaged, documented. | E17, E18 |
+| **M5 — Three platforms** | Budgets met on macOS/Linux, and the clean-machine Windows port is functional, packaged, measured and documented. | E17–E19 |
 
 **Ordering rationale.** Mail before calendar, because mail is the thing you're in all day and the
 calendar is useless without accounts and a store anyway. HTML rendering (E6) sits inside M1 rather
@@ -1801,14 +2000,16 @@ All permissively licensed (MIT / Apache-2.0 / ISC), all checked 2026-09-20.
 | **Scope creep into Thunderbird** | Every mail client does this. Rules, plugins, local folders, Exchange, RSS. | The premise in the preamble is the defence. When in doubt, the answer is no. |
 | **Accessibility** | AccessKit has landed in GPUI but is off behind an undocumented env var, the node tree is empty until each component annotates itself, and Windows screen-reader support is openly broken and unassigned upstream. | Prefer gpui-kit widgets, which do publish roles/labels/values, over hand-rolled elements wherever the design allows. Beyond that: acknowledged, tracked, not solved in v1. An honest statement, not a plan. |
 | **No software rendering, anywhere** | GPUI has no fallback and Zed actively blocks software Vulkan ICDs. This kills Linux machines without a Vulkan driver *and* Windows over RDP/VDI. | Startup capability probe with a real message (E18.4). Not solvable by us — it is a property of the framework. |
+| **Windows only compiles, but has never run** | Hosted CI proves conditional compilation, not DirectX rendering, IME, fractional DPI, Credential Manager, toast activation, suspend/resume or NTFS replacement semantics. Several of those paths are currently explicit no-ops. | E19 starts with a recorded hardware baseline, assigns a story to each platform boundary, and ends with a clean-account acceptance matrix rather than treating CI green as the port. |
 
 ---
 
 ## 8. Open questions
 
-1. **What does "kept green" mean for Windows?** E0.10 builds it in CI and E18.5 does a functional
-   pass, but nobody is using it daily. Is "compiles, launches, basic flows work" enough, or should
-   Windows meet the same budgets as Linux?
+1. **What does "kept green" mean for Windows? Resolved by E19.** CI must compile and test it on
+   every change, a physical Windows 11 x64 machine must pass 19.13 before release, and the recorded
+   reference machine must meet the Linux performance floors in §4. ARM64 and RDP/VDI are explicitly
+   outside the v1 release gate.
 2. **Attachment storage policy.** Download everything on sync, or lazily on open? Lazy is lighter
    and faster to first sync; eager makes offline genuinely offline. Affects E2.3 and the backfill
    arithmetic in §6.5.

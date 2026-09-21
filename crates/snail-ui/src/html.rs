@@ -58,6 +58,8 @@ pub struct Style {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    /// `text-decoration: line-through`, and `<s>` / `<strike>` / `<del>`.
+    pub strike: bool,
     pub align: Align,
     pub margin_top: f32,
     pub margin_bottom: f32,
@@ -71,7 +73,14 @@ pub struct Style {
     pub border_right: Option<f32>,
     pub border_bottom: Option<f32>,
     pub border_left: Option<f32>,
-    pub border_color: Color,
+    /// The colour of every side not given its own. `None` is CSS's `currentColor`: the text
+    /// colour.
+    pub border_color: Option<Color>,
+    /// Per-side colours, top/right/bottom/left, from `border-top: … #hex` and friends.
+    pub border_colors: [Option<Color>; 4],
+    /// Corner radius in px. A negative value is a percentage of the box's shorter side, resolved
+    /// in layout (`border-radius: 50%` is a circle or a pill).
+    pub border_radius: f32,
     /// Absolute dimensions and percentages are kept separately so layout can resolve percentages
     /// against the containing block.
     pub width: Option<f32>,
@@ -117,6 +126,7 @@ impl Default for Style {
             bold: false,
             italic: false,
             underline: false,
+            strike: false,
             align: Align::Left,
             margin_top: 0.0,
             margin_bottom: 0.0,
@@ -130,7 +140,9 @@ impl Default for Style {
             border_right: None,
             border_bottom: None,
             border_left: None,
-            border_color: [0xd9, 0xd4, 0xcc, 0xff],
+            border_color: None,
+            border_colors: [None; 4],
+            border_radius: 0.0,
             width: None,
             width_percent: None,
             max_width: None,
@@ -184,6 +196,7 @@ fn inherit(parent: &Style) -> Style {
         bold: parent.bold,
         italic: parent.italic,
         underline: parent.underline,
+        strike: parent.strike,
         align: parent.align,
         line_height: parent.line_height,
         list_style: parent.list_style,
@@ -218,6 +231,7 @@ pub fn resolve_style(tag: &str, attrs: &HashMap<String, String>, parent: &Style)
         "b" | "strong" => style.bold = true,
         "i" | "em" => style.italic = true,
         "u" => style.underline = true,
+        "s" | "strike" | "del" => style.strike = true,
         "a" => {
             style.display = Display::Inline;
             style.color = [0x2c, 0x5f, 0xb8, 0xff];
@@ -290,6 +304,8 @@ pub fn resolve_style(tag: &str, attrs: &HashMap<String, String>, parent: &Style)
         .and_then(|v| v.trim().parse::<f32>().ok())
     {
         style.border = border;
+        // The legacy attribute's grid is grey, not the text colour.
+        style.border_color = Some([0x80, 0x80, 0x80, 0xff]);
     }
     // `<font size>` only: other elements' `size` attributes (`<hr size>`, `<input size>`) are not
     // font sizes.
@@ -402,6 +418,7 @@ fn apply_declaration(style: &mut Style, name: &str, value: &str) {
         "font-style" => style.italic = lower == "italic",
         "text-decoration" | "text-decoration-line" => {
             style.underline = lower.contains("underline");
+            style.strike = lower.contains("line-through");
         }
         "text-align" => {
             style.align = match lower.as_str() {
@@ -448,20 +465,92 @@ fn apply_declaration(style: &mut Style, name: &str, value: &str) {
         "padding-right" => style.padding_right = parse_length_in(value, em).unwrap_or(0.0),
         "padding-bottom" => style.padding_bottom = parse_length_in(value, em).unwrap_or(0.0),
         "padding-left" => style.padding_left = parse_length_in(value, em).unwrap_or(0.0),
-        "border" | "border-width" => {
-            let border = value
-                .split_whitespace()
-                .find_map(|part| parse_length_in(part, em))
-                .unwrap_or(0.0);
-            set_border(style, border);
+        "border" => {
+            let side = parse_border_side(value, em);
+            set_border(style, side.width);
+            style.border_color = side.color;
+            style.border_colors = [None; 4];
         }
-        "border-top" => style.border_top = parse_border_width(value, em),
-        "border-right" => style.border_right = parse_border_width(value, em),
-        "border-bottom" => style.border_bottom = parse_border_width(value, em),
-        "border-left" => style.border_left = parse_border_width(value, em),
+        "border-width" => {
+            if let Some([top, right, bottom, left]) = parse_box_lengths(value, em) {
+                style.border = top;
+                style.border_top = Some(top);
+                style.border_right = Some(right);
+                style.border_bottom = Some(bottom);
+                style.border_left = Some(left);
+            }
+        }
+        "border-top" | "border-right" | "border-bottom" | "border-left" => {
+            let side = parse_border_side(value, em);
+            let index = match name {
+                "border-top" => 0,
+                "border-right" => 1,
+                "border-bottom" => 2,
+                _ => 3,
+            };
+            *[
+                &mut style.border_top,
+                &mut style.border_right,
+                &mut style.border_bottom,
+                &mut style.border_left,
+            ][index] = Some(side.width);
+            style.border_colors[index] = side.color;
+        }
         "border-color" => {
-            if let Some(color) = parse_color(value) {
-                style.border_color = color;
+            let colors: Vec<Color> = split_css_values(value)
+                .iter()
+                .filter_map(|part| parse_color(part))
+                .collect();
+            let [top, right, bottom, left] = match colors.as_slice() {
+                [all] => [*all; 4],
+                [vertical, horizontal] => [*vertical, *horizontal, *vertical, *horizontal],
+                [top, horizontal, bottom] => [*top, *horizontal, *bottom, *horizontal],
+                [top, right, bottom, left, ..] => [*top, *right, *bottom, *left],
+                [] => return,
+            };
+            style.border_color = Some(top);
+            style.border_colors = [Some(top), Some(right), Some(bottom), Some(left)];
+        }
+        "border-style" if matches!(lower.as_str(), "none" | "hidden") => set_border(style, 0.0),
+        // The per-side longhands: `border-bottom-width: 1px; border-bottom-style: solid;
+        // border-bottom-color: #e1e4e8` is how GitHub draws its dividers.
+        _ if name.starts_with("border-") && side_longhand(name).is_some() => {
+            let (index, part) = side_longhand(name).expect("checked");
+            let width = [
+                &mut style.border_top,
+                &mut style.border_right,
+                &mut style.border_bottom,
+                &mut style.border_left,
+            ];
+            match part {
+                "width" => {
+                    let parsed = match lower.as_str() {
+                        "thin" => Some(1.0),
+                        "medium" => Some(3.0),
+                        "thick" => Some(5.0),
+                        _ => parse_length_in(value, em),
+                    };
+                    if let Some(parsed) = parsed {
+                        *width[index] = Some(parsed);
+                    }
+                }
+                "style" if matches!(lower.as_str(), "none" | "hidden") => *width[index] = Some(0.0),
+                "color" => {
+                    if let Some(color) = parse_color(value) {
+                        style.border_colors[index] = Some(color);
+                    }
+                }
+                _ => {}
+            }
+        }
+        "border-radius" => {
+            // One radius for all four corners; the first value of a longer form.
+            if let Some(first) = split_css_values(value).first() {
+                if let Some(percent) = parse_percentage(first) {
+                    style.border_radius = -percent * 100.0;
+                } else if let Some(px) = parse_length_in(first, em) {
+                    style.border_radius = px.max(0.0);
+                }
             }
         }
         "width" => set_width(style, value),
@@ -520,10 +609,92 @@ fn set_border(style: &mut Style, width: f32) {
     style.border_left = Some(width);
 }
 
-fn parse_border_width(value: &str, em: f32) -> Option<f32> {
-    value
-        .split_whitespace()
-        .find_map(|part| parse_length_in(part, em))
+/// `border-bottom-width` → (2, "width"); `None` for anything else.
+fn side_longhand(name: &str) -> Option<(usize, &str)> {
+    let rest = name.strip_prefix("border-")?;
+    let (side, part) = rest.split_once('-')?;
+    let index = match side {
+        "top" => 0,
+        "right" => 1,
+        "bottom" => 2,
+        "left" => 3,
+        _ => return None,
+    };
+    matches!(part, "width" | "style" | "color").then_some((index, part))
+}
+
+/// One side of a border shorthand: `1px solid #ccc`, `12px solid rgb(20, 111, 245)`, `none`.
+struct BorderSide {
+    width: f32,
+    color: Option<Color>,
+}
+
+/// Parse a `border` / `border-top` … shorthand. As in CSS, a border with no style is no border
+/// (`border: 1px #ccc` draws nothing); a style with no width is `medium`, 3px; and a missing colour
+/// is the text colour, left to layout.
+fn parse_border_side(value: &str, em: f32) -> BorderSide {
+    let mut width = None;
+    let mut color = None;
+    let mut styled = false;
+    for part in split_css_values(value) {
+        let lower = part.to_ascii_lowercase();
+        match lower.as_str() {
+            "none" | "hidden" => {
+                return BorderSide {
+                    width: 0.0,
+                    color: None,
+                };
+            }
+            "solid" | "dashed" | "dotted" | "double" | "groove" | "ridge" | "inset" | "outset" => {
+                styled = true;
+            }
+            "thin" => width = Some(1.0),
+            "medium" => width = Some(3.0),
+            "thick" => width = Some(5.0),
+            _ => {
+                if let Some(length) = parse_length_in(&part, em) {
+                    width = Some(length);
+                } else if let Some(parsed) = parse_color(&part) {
+                    color = Some(parsed);
+                }
+            }
+        }
+    }
+    let width = match (styled, width) {
+        (true, width) => width.unwrap_or(3.0),
+        // Unstyled: only an explicit zero is meaningful (and harmless) — `border: 0`.
+        (false, _) => 0.0,
+    };
+    BorderSide { width, color }
+}
+
+/// Split a CSS value on whitespace, keeping `rgb(20, 111, 245)` and friends whole.
+fn split_css_values(value: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    for character in value.chars() {
+        match character {
+            '(' => {
+                depth += 1;
+                current.push(character);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                current.push(character);
+            }
+            c if c.is_whitespace() && depth == 0 => {
+                if !current.is_empty() {
+                    parts.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
 }
 
 fn set_width(style: &mut Style, value: &str) {
@@ -856,6 +1027,56 @@ mod tests {
         // No field exists for float/position, so nothing to assert but non-mutation of others.
         assert!(!style.bold);
         let _ = before;
+    }
+
+    // Regression (Slickdeals): a button whose padding is a same-coloured border drew as a grey
+    // box, because the shorthand's colour was dropped for a hardcoded default.
+    #[test]
+    fn border_shorthands_keep_their_colour_and_need_a_style() {
+        let mut style = Style::default();
+        apply_inline_style(
+            &mut style,
+            "border-top:12px solid #146ff5;border-left:23px solid rgb(20, 111, 245)",
+        );
+        assert_eq!(style.border_top, Some(12.0));
+        assert_eq!(style.border_colors[0], Some([0x14, 0x6f, 0xf5, 0xff]));
+        assert_eq!(style.border_left, Some(23.0));
+        assert_eq!(style.border_colors[3], Some([20, 111, 245, 0xff]));
+
+        let mut unstyled = Style::default();
+        apply_inline_style(&mut unstyled, "border: 1px #cccccc");
+        assert_eq!(
+            unstyled.border_top,
+            Some(0.0),
+            "no style means no border, as in CSS"
+        );
+
+        let mut plain = Style::default();
+        apply_inline_style(&mut plain, "border: solid");
+        assert_eq!(plain.border_top, Some(3.0), "a style alone is `medium`");
+        assert_eq!(plain.border_color, None, "and takes the text colour");
+
+        let mut longhand = Style::default();
+        apply_inline_style(
+            &mut longhand,
+            "border-bottom-width:thin;border-bottom-style:solid;border-bottom-color:#e1e4e8",
+        );
+        assert_eq!(longhand.border_bottom, Some(1.0));
+        assert_eq!(longhand.border_colors[2], Some([0xe1, 0xe4, 0xe8, 0xff]));
+
+        let mut none = Style::default();
+        apply_inline_style(&mut none, "border:1px solid red;border-style:none");
+        assert_eq!(none.border_top, Some(0.0));
+    }
+
+    #[test]
+    fn border_radius_takes_pixels_or_a_percentage() {
+        let mut pill = Style::default();
+        apply_inline_style(&mut pill, "border-radius:50px");
+        assert_eq!(pill.border_radius, 50.0);
+        let mut circle = Style::default();
+        apply_inline_style(&mut circle, "border-radius:50% 50%");
+        assert_eq!(circle.border_radius, -50.0);
     }
 
     #[test]
