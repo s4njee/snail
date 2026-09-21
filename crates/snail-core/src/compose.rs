@@ -15,9 +15,36 @@ pub struct Draft {
     pub cc: Vec<Recipient>,
     pub bcc: Vec<Recipient>,
     pub subject: String,
+    /// Plain text (always present, E7.8).
     pub body_text: String,
+    /// Optional rich alternative, sent as `multipart/alternative` (E7.8).
+    pub body_html: Option<String>,
+    /// Attachments, sent as `multipart/mixed` (E7.7).
+    pub attachments: Vec<Attachment>,
     pub in_reply_to: Option<String>,
     pub references: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Attachment {
+    pub filename: String,
+    pub content_type: String,
+    pub bytes: Vec<u8>,
+}
+
+impl Attachment {
+    /// The provider size limit is 20 MB for iCloud (E4.20); warn above ~18 MB to leave header room.
+    pub const WARN_BYTES: usize = 18 * 1024 * 1024;
+}
+
+impl Default for Attachment {
+    fn default() -> Self {
+        Self {
+            filename: String::new(),
+            content_type: "application/octet-stream".into(),
+            bytes: Vec::new(),
+        }
+    }
 }
 
 /// Serialize a draft to RFC822 bytes. Angular brackets are added around the threading ids.
@@ -42,11 +69,21 @@ pub fn build_raw(draft: &Draft) -> Result<Vec<u8>> {
         .subject(draft.subject.clone())
         .text_body(draft.body_text.clone());
 
+    if let Some(html) = draft.body_html.as_deref().filter(|html| !html.trim().is_empty()) {
+        builder = builder.html_body(html.to_string());
+    }
     if !draft.cc.is_empty() {
         builder = builder.cc(addresses(&draft.cc));
     }
     if !draft.bcc.is_empty() {
         builder = builder.bcc(addresses(&draft.bcc));
+    }
+    for attachment in &draft.attachments {
+        builder = builder.attachment(
+            attachment.content_type.clone(),
+            attachment.filename.clone(),
+            attachment.bytes.clone(),
+        );
     }
     if let Some(in_reply_to) = draft.in_reply_to.as_deref().filter(|id| !id.is_empty()) {
         builder = builder.in_reply_to(format!("<{in_reply_to}>"));
@@ -243,6 +280,29 @@ mod tests {
         assert!(!addresses.contains(&"me@example.com"), "not to self");
         assert!(!addresses.contains(&"maya@example.com"), "not to the sender again");
         assert!(addresses.contains(&"other@example.com"));
+    }
+
+    #[test]
+    fn attachments_and_html_round_trip() {
+        let mut draft = Draft {
+            to: vec![Recipient { name: None, address: "a@b.c".into() }],
+            from_addr: Some("me@example.com".into()),
+            subject: "files".into(),
+            body_text: "see attached".into(),
+            body_html: Some("<p>see attached</p>".into()),
+            attachments: vec![Attachment {
+                filename: "report.pdf".into(),
+                content_type: "application/pdf".into(),
+                bytes: b"PDFBYTES".to_vec(),
+            }],
+            ..Default::default()
+        };
+        draft.from_name = Some("Me".into());
+        let raw = build_raw(&draft).unwrap();
+        let parsed = crate::mime::parse_raw(&raw).unwrap();
+        assert!(matches!(parsed.body, Body::Html(_)), "html alternative wins for display");
+        assert_eq!(parsed.attachments.len(), 1);
+        assert_eq!(parsed.attachments[0].filename.as_deref(), Some("report.pdf"));
     }
 
     #[test]

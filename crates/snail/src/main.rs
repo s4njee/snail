@@ -60,6 +60,7 @@ fn main() {
             || arg == "--bench-store"
             || arg == "--backfill-gmail"
             || arg == "--import-eml"
+            || arg == "--drain-sends"
     }) {
         if let Err(error) = run_store_cli(&paths, &args) {
             eprintln!("{error:#}");
@@ -234,6 +235,25 @@ fn run_store_cli(paths: &Paths, args: &[String]) -> anyhow::Result<()> {
         })?;
         store.recount_mailbox(mailbox)?;
         println!("imported {path}: inserted={inserted}");
+    }
+
+    if args.iter().any(|arg| arg == "--drain-sends") {
+        let client_id = env_var("SNAIL_GOOGLE_CLIENT_ID")?;
+        let client_secret = env_var("SNAIL_GOOGLE_CLIENT_SECRET")?;
+        let refresh_token = env_var("SNAIL_GOOGLE_REFRESH_TOKEN")?;
+        let oauth = GoogleOAuth::new(client_id, client_secret);
+        let tokens = oauth.refresh(&refresh_token)?;
+        let client = GmailClient::new(Arc::new(FixedToken(tokens.access_token)))?;
+        let store = Store::open(paths)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs() as i64)
+            .unwrap_or(0);
+        let report = snail_services::outbox::drain_sends(&store, &client, 20, now)?;
+        println!(
+            "send drain: {} sent, {} failed, {} dead",
+            report.sent, report.failed, report.dead
+        );
     }
 
     if args.iter().any(|arg| arg == "--bench-store") {

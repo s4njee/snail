@@ -156,6 +156,14 @@ pub struct MailboxRow {
     pub total: i64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContactRow {
+    pub address: String,
+    pub name: Option<String>,
+    /// `2 * sent + received`, so people you write to rank above bulk senders (E7.3).
+    pub score: i64,
+}
+
 pub struct Store {
     conn: Mutex<Connection>,
     cache: CacheStore,
@@ -526,6 +534,80 @@ impl Store {
         })
     }
 
+    /// Harvest From/To addresses from the messages already synced (E7.3). Idempotent: it rebuilds
+    /// the counts from scratch, so it is safe to re-run.
+    pub fn harvest_contacts(&self, account_id: i64) -> Result<usize> {
+        self.with_db(|conn| {
+            conn.execute("DELETE FROM contact WHERE account_id = ?1", params![account_id])?;
+            let mut statement = conn.prepare(
+                "SELECT from_name, from_addr, to_json, date FROM message WHERE account_id = ?1",
+            )?;
+            let rows = statement.query_map(params![account_id], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            })?;
+            let mut contacts = std::collections::BTreeMap::<String, (Option<String>, i64, i64, i64)>::new();
+            for row in rows {
+                let (name, from, to_json, date) = row?;
+                if let Some(address) = from.filter(|address| !address.is_empty()) {
+                    let entry = contacts.entry(address).or_default();
+                    entry.0 = entry.0.take().or(name);
+                    entry.2 += 1;
+                    entry.3 = entry.3.max(date.unwrap_or(0));
+                }
+                if let Some(to_json) = to_json {
+                    if let Ok(recipients) = serde_json::from_str::<Vec<crate::mime::Recipient>>(&to_json) {
+                        for recipient in recipients {
+                            if recipient.address.is_empty() {
+                                continue;
+                            }
+                            let entry = contacts.entry(recipient.address).or_default();
+                            entry.0 = entry.0.take().or(recipient.name);
+                            entry.1 += 1;
+                            entry.3 = entry.3.max(date.unwrap_or(0));
+                        }
+                    }
+                }
+            }
+            let mut count = 0;
+            for (address, (name, sent, received, last_seen)) in contacts {
+                conn.execute(
+                    "INSERT INTO contact (account_id, address, name, sent, received, last_seen)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![account_id, address, name, sent, received, last_seen],
+                )?;
+                count += 1;
+            }
+            Ok(count)
+        })
+    }
+
+    /// Address autocomplete: prefix matches on address or name, best score first (E7.3).
+    pub fn suggest_contacts(&self, account_id: i64, prefix: &str, limit: u32) -> Result<Vec<ContactRow>> {
+        let pattern = format!("{}%", prefix.trim().to_lowercase());
+        self.with_db(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT address, name, (sent * 2 + received) AS score
+                 FROM contact
+                 WHERE account_id = ?1
+                   AND (lower(address) LIKE ?2 OR lower(COALESCE(name, '')) LIKE ?2)
+                 ORDER BY score DESC, last_seen DESC LIMIT ?3",
+            )?;
+            let rows = statement.query_map(params![account_id, pattern, limit], |row| {
+                Ok(ContactRow {
+                    address: row.get(0)?,
+                    name: row.get(1)?,
+                    score: row.get(2)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
     /// Insert only if this provider id is new; used by backfill so a re-run converges (E4.23).
     pub fn insert_message_if_new(&self, message: &NewMessage) -> Result<bool> {
         match &message.provider {
@@ -685,6 +767,17 @@ impl Store {
                 failed: count("failed")?,
                 dead: count("dead")?,
             })
+        })
+    }
+
+    /// Move failed and dead-lettered operations back to `pending` (E7.12's explicit retry).
+    pub fn requeue_failed_ops(&self) -> Result<usize> {
+        self.with_db(|conn| {
+            Ok(conn.execute(
+                "UPDATE pending_op SET state = 'pending', attempts = 0, last_error = NULL
+                 WHERE state IN ('failed', 'dead')",
+                [],
+            )?)
         })
     }
 
@@ -1064,6 +1157,58 @@ mod tests {
 
         store.delete_message(id).unwrap();
         assert!(store.page(drafts, 10, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn contacts_are_harvested_and_suggested() {
+        let store = store_with_account();
+        for (id, date) in [("g1", 100), ("g2", 200)] {
+            store
+                .insert_message(&NewMessage {
+                    account_id: 1,
+                    provider: Some(ProviderRef::Gmail {
+                        id: id.into(),
+                        thread_id: None,
+                        history_id: None,
+                    }),
+                    from_name: Some("Maya".into()),
+                    from_addr: Some("maya@example.com".into()),
+                    to_json: Some(r#"[{"name":null,"address":"me@example.com"}]"#.into()),
+                    date: Some(date),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        let count = store.harvest_contacts(1).unwrap();
+        assert!(count >= 2, "maya and me");
+        let suggestions = store.suggest_contacts(1, "may", 5).unwrap();
+        assert_eq!(suggestions[0].address, "maya@example.com");
+        assert_eq!(suggestions[0].name.as_deref(), Some("Maya"));
+        assert_eq!(suggestions[0].score, 2, "received twice, never written to");
+        // Prefix matches the name too.
+        assert!(store.suggest_contacts(1, "me@", 5).unwrap().iter().any(|c| c.address == "me@example.com"));
+    }
+
+    #[test]
+    fn failed_ops_can_be_requeued_explicitly() {
+        let store = store_with_account();
+        store
+            .enqueue_op(&NewOp {
+                account_id: 1,
+                target_kind: "message".into(),
+                target_id: None,
+                operation: "send".into(),
+                payload_json: None,
+                idempotency_key: "send:1".into(),
+                now: 0,
+            })
+            .unwrap();
+        let id = store.pending_ops(10).unwrap()[0].id;
+        store.set_op_state(id, "failed", Some("smtp"), 0).unwrap();
+        store.set_op_state(id, "dead", Some("smtp"), 0).unwrap();
+        assert_eq!(store.op_counts().unwrap().dead, 1);
+        assert_eq!(store.requeue_failed_ops().unwrap(), 1);
+        assert_eq!(store.op_counts().unwrap().pending, 1);
     }
 
     #[test]

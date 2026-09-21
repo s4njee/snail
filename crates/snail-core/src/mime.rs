@@ -6,9 +6,9 @@ use std::borrow::Cow;
 use anyhow::{Context, Result};
 use base64::Engine;
 use mail_parser::{Encoding, MessageParser, MessagePart, MimeHeaders, PartType};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Recipient {
     pub name: Option<String>,
     pub address: String,

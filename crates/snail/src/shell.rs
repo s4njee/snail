@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -68,6 +69,9 @@ pub struct Shell {
     pending_remote: Vec<RemoteImage>,
     generation: u64,
     reading_scroll: ScrollHandle,
+    /// The inline reply box (E7.5).
+    inline_reply: Entity<TextareaState>,
+    inline_open: bool,
     /// Set when the user clicks "Load images" for the current message (E6.2), independent of the
     /// global switch and the per-sender allowance.
     forced_message: Option<i64>,
@@ -83,6 +87,7 @@ impl Shell {
                 cx.notify();
             }
         });
+        let inline_reply = cx.new(|cx| TextareaState::new(window, cx).placeholder("Write a reply…"));
         let mut shell = Self {
             focus,
             overlay: DevOverlay::new(),
@@ -97,9 +102,19 @@ impl Shell {
             pending_remote: Vec::new(),
             generation: 0,
             reading_scroll: ScrollHandle::new(),
+            inline_reply,
+            inline_open: false,
             forced_message: None,
-        };
-        shell.reload(window, cx);
+        };        shell.reload(window, cx);
+        // Harvest contacts once on the background executor so autocomplete has data (E7.3).
+        {
+            let mail = shell.mail.clone();
+            cx.background_executor()
+                .spawn(async move {
+                    mail.harvest_contacts();
+                })
+                .detach();
+        }
         shell
     }
 
@@ -471,6 +486,44 @@ impl Shell {
                 let selected = index == self.selected_mailbox;
                 Self::sidebar_item(palette, cx, index, mailbox, selected)
             }))
+            .child(div().flex_1())
+            .when(self.mail.pending_sends() > 0, |this| {
+                let (failed, pending) = self.mail.send_queue();
+                this.child(
+                    div()
+                        .px_2()
+                        .pt_2()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .border_t_1()
+                        .border_color(style::color(palette.colors.border_soft))
+                        .when(pending > 0, |this| {
+                            this.child(style::text(
+                                format!("{pending} pending"),
+                                TextRole::SidebarCount,
+                                cx,
+                            ))
+                        })
+                        .when(failed > 0, |this| {
+                            this.child(
+                                div()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _window, cx| {
+                                            this.mail.retry_failed_sends();
+                                            cx.notify();
+                                        }),
+                                    )
+                                    .child(style::text(
+                                        format!("{failed} failed · retry"),
+                                        TextRole::SidebarCount,
+                                        cx,
+                                    )),
+                            )
+                        }),
+                )
+            })
             .into_any_element()
     }
 
@@ -736,8 +789,7 @@ impl Shell {
         crate::compose::open(self.mail.clone(), draft, cx);
     }
 
-    fn reading_pane(&self, palette: &snail_ui::theme::Theme, cx: &mut Context<Self>) -> AnyElement {
-        let Some(reading) = &self.reading else {
+    fn reading_pane(&self, palette: &snail_ui::theme::Theme, cx: &mut Context<Self>) -> AnyElement {        let Some(reading) = &self.reading else {
             return Self::empty_state(palette, cx, EmptyState::EmptyMailbox);
         };
         let is_html = matches!(&reading.body, BodyKind::Html { .. });
@@ -951,7 +1003,112 @@ impl Shell {
                             }),
                     ),
             )
+            .child({
+                // Inline reply (E7.5): collapsed placeholder, expands in place, promotable.
+                let base = div()
+                    .flex_none()
+                    .px_6()
+                    .py_3()
+                    .border_t_1()
+                    .border_color(style::color(palette.colors.border_hairline));
+                if self.inline_open {
+                    base.child(
+                        div()
+                            .rounded(px(palette.radii.card))
+                            .border_1()
+                            .border_color(style::color(palette.colors.border))
+                            .bg(style::color(palette.colors.card))
+                            .p_3()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(Textarea::new(&self.inline_reply).h(px(110.0)))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .justify_end()
+                                            .gap_2()
+                                            .child(action("Pop out").on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this, _, window, cx| {
+                                                    this.inline_pop_out(window, cx)
+                                                }),
+                                            ))
+                                            .child(action("Send").on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this, _, window, cx| {
+                                                    this.inline_send(window, cx)
+                                                }),
+                                            )),
+                                    ),
+                            ),
+                    )
+                    .into_any_element()
+                } else {
+                    base.child(
+                        div()
+                            .rounded(px(palette.radii.card))
+                            .border_1()
+                            .border_color(style::color(palette.colors.border))
+                            .bg(style::color(palette.colors.card))
+                            .px_3()
+                            .py_2()
+                            .text_size(px(13.0))
+                            .text_color(style::color(palette.colors.faint))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    this.inline_open = true;
+                                    let state = this.inline_reply.clone();
+                                    state.update(cx, |state, cx| state.focus(window, cx));
+                                    cx.notify();
+                                }),
+                            )
+                            .child("Write a reply…"),
+                    )
+                    .into_any_element()
+                }
+            })
             .into_any_element()
+    }
+
+    fn inline_reply_draft(&self, cx: &App) -> Option<snail_core::compose::Draft> {
+        let id = self.selection.cursor()?;
+        let parsed = self.mail.parsed(id)?;
+        let self_addr = self.mail.first_account_address();
+        let mut draft = snail_core::compose::reply(&parsed, self_addr.as_deref(), false);
+        if let Some(signature) = crate::settings::signature(cx) {
+            draft.body_text = snail_core::compose::with_signature(&draft.body_text, &signature);
+        }
+        let typed = self.inline_reply.read(cx).value().to_string();
+        draft.body_text = format!("{typed}{}", draft.body_text);
+        Some(draft)
+    }
+
+    /// Promote the inline reply to the full compose window without losing the text (E7.5).
+    fn inline_pop_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(draft) = self.inline_reply_draft(cx) else {
+            return;
+        };
+        self.inline_open = false;
+        let state = self.inline_reply.clone();
+        state.update(cx, |state, cx| state.set_value("", window, cx));
+        crate::compose::open(self.mail.clone(), draft, cx);
+        cx.notify();
+    }
+
+    fn inline_send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(draft) = self.inline_reply_draft(cx) {
+            if let Ok(raw) = snail_core::compose::build_raw(&draft) {
+                let _ = self.mail.enqueue_send(&raw);
+            }
+        }
+        self.inline_open = false;
+        let state = self.inline_reply.clone();
+        state.update(cx, |state, cx| state.set_value("", window, cx));
+        cx.notify();
     }
 
     fn empty_state(palette: &snail_ui::theme::Theme, cx: &App, state: EmptyState) -> AnyElement {

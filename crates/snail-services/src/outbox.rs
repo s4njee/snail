@@ -7,7 +7,7 @@
 use anyhow::Result;
 
 use snail_core::providers::MailProvider;
-use snail_core::store::Store;
+use snail_core::store::{NewMessage, ProviderRef, Store};
 
 /// Give up after this many attempts and move the op to the dead-letter state.
 pub const MAX_ATTEMPTS: i64 = 5;
@@ -52,6 +52,10 @@ pub fn drain_sends(
 
         match provider.send(&raw) {
             Ok(()) => {
+                // The sent copy lands in the local Sent mailbox so it is visible offline (E7.11).
+                if let Err(error) = record_sent_copy(store, op.account_id, &raw, now) {
+                    log::warn!("could not record the sent copy: {error:#}");
+                }
                 store.set_op_state(op.id, "done", None, now)?;
                 report.sent += 1;
             }
@@ -70,9 +74,39 @@ pub fn drain_sends(
     Ok(report)
 }
 
+/// Insert the just-sent message into the local Sent mailbox (E7.11). Best-effort: a failure here
+/// must not turn a delivered send into a retry.
+fn record_sent_copy(store: &Store, account_id: i64, raw: &[u8], now: i64) -> Result<()> {
+    let parsed = snail_core::mime::parse_raw(raw).ok();
+    let mailbox = store.ensure_mailbox(account_id, "Sent", "sent")?;
+    let hash = store.cache().put(raw)?;
+    let message = NewMessage {
+        account_id,
+        mailbox_id: Some(mailbox),
+        provider: Some(ProviderRef::Gmail {
+            id: format!("sent-{hash}"),
+            thread_id: None,
+            history_id: None,
+        }),
+        subject: parsed.as_ref().and_then(|parsed| parsed.subject.clone()),
+        from_name: parsed.as_ref().and_then(|parsed| parsed.from_name.clone()),
+        from_addr: parsed.as_ref().and_then(|parsed| parsed.from_addr.clone()),
+        to_json: parsed
+            .as_ref()
+            .and_then(|parsed| serde_json::to_string(&parsed.to).ok()),
+        date: Some(now),
+        preview: parsed.as_ref().and_then(|parsed| parsed.preview.clone()),
+        unread: false,
+        raw_hash: Some(hash),
+        ..Default::default()
+    };
+    store.insert_message_if_new(&message)?;
+    store.recount_mailbox(mailbox)?;
+    Ok(())
+}
+
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod tests {    use super::*;
     use anyhow::{Result, bail};
     use snail_core::providers::{Changes, OpOutcome, RawMessage, RemoteOp};
     use snail_core::store::{NewOp, SyncState};
@@ -125,6 +159,9 @@ mod tests {
         assert_eq!(report, SendReport { sent: 1, failed: 0, dead: 0 });
         // A delivered op is no longer pending.
         assert!(store.pending_ops(10).unwrap().is_empty());
+        // The sent copy landed in the local Sent mailbox (E7.11).
+        let sent = store.mailbox_id(1, "Sent").unwrap().unwrap();
+        assert_eq!(store.page(sent, 10, 0).unwrap().len(), 1);
     }
 
     #[test]

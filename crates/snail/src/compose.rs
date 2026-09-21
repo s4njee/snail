@@ -1,6 +1,5 @@
-//! The compose window (plan.md E7.1): a **second window**, not a modal, so it survives navigation.
-//! Built on gpui-kit's `Input`/`Textarea`, which E0.2 validated. Drafts autosave to the store
-//! (E7.6) and Send is held for an undo window before it is queued (E7.10).
+//! The compose window (plan.md E7.1–E7.10): recipient tokens (7.2), contacts autocomplete (7.3),
+//! attachments (7.7), a minimal rich-text mode (7.8), draft autosave (7.6) and undo send (7.10).
 
 use std::time::{Duration, Instant};
 
@@ -9,17 +8,17 @@ use gpui_kit::component::{Root, TitleBar};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
-use snail_core::compose::{self, Draft};
+use snail_core::compose::{self, Attachment, Draft};
 use snail_core::mime::Recipient;
+use snail_core::store::ContactRow;
 use snail_ui::text::TextRole;
 
 use crate::mail_model::MailModel;
 use crate::style;
 
-/// Default autosave debounce.
 const AUTOSAVE: Duration = Duration::from_millis(1000);
+const MAX_SUGGESTIONS: u32 = 5;
 
-/// Open a compose window with the given draft (E7.1).
 pub fn open(mail: MailModel, draft: Draft, cx: &mut App) {
     let bounds = Bounds::centered(None, size(px(620.0), px(520.0)), cx);
     cx.open_window(
@@ -40,33 +39,28 @@ pub fn open(mail: MailModel, draft: Draft, cx: &mut App) {
 struct Compose {
     mail: MailModel,
     draft: Draft,
-    to: Entity<InputState>,
-    cc: Entity<InputState>,
+    to_tokens: Vec<Recipient>,
+    cc_tokens: Vec<Recipient>,
+    to_input: Entity<InputState>,
+    cc_input: Entity<InputState>,
     subject: Entity<InputState>,
     body: Entity<TextareaState>,
+    suggestions: Vec<ContactRow>,
+    attachments: Vec<Attachment>,
+    rich: bool,
     focus: FocusHandle,
-    /// The saved draft row, reused by every autosave (E7.6).
     draft_id: Option<i64>,
     dirty: bool,
     last_edit: Option<Instant>,
     saved_at: Option<Instant>,
-    /// Set while the undo-send window is open (E7.10).
     send_at: Option<Instant>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl Compose {
     fn new(mail: MailModel, draft: Draft, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let to = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("To")
-                .default_value(join_addresses(&draft.to))
-        });
-        let cc = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Cc")
-                .default_value(join_addresses(&draft.cc))
-        });
+        let to_input = cx.new(|cx| InputState::new(window, cx).placeholder("To"));
+        let cc_input = cx.new(|cx| InputState::new(window, cx).placeholder("Cc"));
         let subject = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Subject")
@@ -79,13 +73,29 @@ impl Compose {
         });
 
         let mut subscriptions = Vec::new();
-        for state in [to.clone(), cc.clone(), subject.clone()] {
-            subscriptions.push(cx.subscribe(&state, |this, _state, event, cx| {
+        subscriptions.push(cx.subscribe_in(
+            &to_input,
+            window,
+            |this, _state, event, window, cx| {
                 if matches!(event, InputEvent::Change) {
-                    this.mark_dirty(cx);
+                    this.on_recipient_change(true, window, cx);
                 }
-            }));
-        }
+            },
+        ));
+        subscriptions.push(cx.subscribe_in(
+            &cc_input,
+            window,
+            |this, _state, event, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.on_recipient_change(false, window, cx);
+                }
+            },
+        ));
+        subscriptions.push(cx.subscribe(&subject, |this, _state, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.mark_dirty(cx);
+            }
+        }));
         subscriptions.push(cx.subscribe(&body, |this, _state, event, cx| {
             if matches!(event, InputEvent::Change) {
                 this.mark_dirty(cx);
@@ -94,13 +104,21 @@ impl Compose {
 
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+        let rich = draft.body_html.is_some();
+        let to_tokens = draft.to.clone();
+        let cc_tokens = draft.cc.clone();
         Self {
             mail,
             draft,
-            to,
-            cc,
+            to_tokens,
+            cc_tokens,
+            to_input,
+            cc_input,
             subject,
             body,
+            suggestions: Vec::new(),
+            attachments: Vec::new(),
+            rich,
             focus,
             draft_id: None,
             dirty: false,
@@ -117,17 +135,84 @@ impl Compose {
         cx.notify();
     }
 
-    /// Read the fields back into a draft.
+    /// On a `To`/`Cc` change: a trailing `,`/`;` commits a token, otherwise refresh suggestions.
+    fn on_recipient_change(&mut self, to: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let input = if to {
+            self.to_input.clone()
+        } else {
+            self.cc_input.clone()
+        };
+        let value = input.read(cx).value().to_string();
+        if value.ends_with([',', ';']) {
+            let tokens = if to {
+                &mut self.to_tokens
+            } else {
+                &mut self.cc_tokens
+            };
+            for part in value.split([',', ';']) {
+                let part = part.trim();
+                if !part.is_empty() {
+                    tokens.push(Recipient {
+                        name: None,
+                        address: part.to_string(),
+                    });
+                }
+            }
+            input.update(cx, |state, cx| state.set_value("", window, cx));
+            self.suggestions.clear();
+        } else if to {
+            self.suggestions = self.mail.suggest_contacts(value.trim(), MAX_SUGGESTIONS);
+        }
+        self.mark_dirty(cx);
+    }
+
+    fn commit_suggestion(
+        &mut self,
+        contact: ContactRow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.to_tokens.push(Recipient {
+            name: contact.name,
+            address: contact.address,
+        });
+        self.suggestions.clear();
+        let input = self.to_input.clone();
+        input.update(cx, |state, cx| state.set_value("", window, cx));
+        self.mark_dirty(cx);
+    }
+
+    fn remove_token(&mut self, to: bool, index: usize, cx: &mut Context<Self>) {
+        let tokens = if to {
+            &mut self.to_tokens
+        } else {
+            &mut self.cc_tokens
+        };
+        if index < tokens.len() {
+            tokens.remove(index);
+        }
+        self.mark_dirty(cx);
+    }
+
     fn collect(&self, cx: &App) -> Draft {
         let mut draft = self.draft.clone();
-        draft.to = parse_addresses(&self.to.read(cx).value().to_string());
-        draft.cc = parse_addresses(&self.cc.read(cx).value().to_string());
+        let mut to = self.to_tokens.clone();
+        let trailing = self.to_input.read(cx).value().to_string();
+        if trailing.contains('@') {
+            to.push(Recipient {
+                name: None,
+                address: trailing.trim().to_string(),
+            });
+        }
+        draft.to = to;
+        draft.cc = self.cc_tokens.clone();
         draft.subject = self.subject.read(cx).value().to_string();
         draft.body_text = self.body.read(cx).value().to_string();
+        draft.body_html = self.rich.then(|| self.body.read(cx).value().to_string());
+        draft.attachments = self.attachments.clone();
         draft
     }
 
-    /// Autosave to the Drafts mailbox (E7.6).
     fn autosave(&mut self, cx: &mut Context<Self>) {
         let draft = self.collect(cx);
         let raw = compose::build_raw(&draft).unwrap_or_default();
@@ -142,7 +227,6 @@ impl Compose {
         self.saved_at = Some(Instant::now());
     }
 
-    /// Start the undo-send window: save the draft, then hold the send (E7.10).
     fn begin_send(&mut self, cx: &mut Context<Self>) {
         if self.collect(cx).to.is_empty() {
             log::warn!("not sending with no recipients");
@@ -154,7 +238,6 @@ impl Compose {
         cx.notify();
     }
 
-    /// The undo window expired: queue the send and remove the draft.
     fn dispatch(&mut self, cx: &mut Context<Self>) {
         let draft = self.collect(cx);
         if let Ok(raw) = compose::build_raw(&draft) {
@@ -172,6 +255,40 @@ impl Compose {
     fn undo_send(&mut self, cx: &mut Context<Self>) {
         self.send_at = None;
         cx.notify();
+    }
+
+    fn attach(&mut self, cx: &mut Context<Self>) {
+        let Some(paths) = rfd::FileDialog::new().pick_files() else {
+            return;
+        };
+        for path in paths {
+            let Ok(bytes) = std::fs::read(&path) else {
+                log::warn!("could not read {}", path.display());
+                continue;
+            };
+            let filename = path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| "attachment".into());
+            if bytes.len() > Attachment::WARN_BYTES {
+                log::warn!("{filename} is over the 20 MB provider limit");
+            }
+            self.attachments.push(Attachment {
+                content_type: content_type_for(&filename).to_string(),
+                filename,
+                bytes,
+            });
+        }
+        self.mark_dirty(cx);
+    }
+
+    /// The minimal format bar (E7.8): switch to rich mode and insert a tag at the caret.
+    fn format(&mut self, tag: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.rich = true;
+        let body = self.body.clone();
+        let snippet = format!("<{tag}></{tag}>");
+        body.update(cx, |state, cx| state.insert(snippet, window, cx));
+        self.mark_dirty(cx);
     }
 }
 
@@ -197,24 +314,6 @@ impl Render for Compose {
         }
 
         let palette = style::palette(cx);
-        let field = |label: &str, input: AnyElement| {
-            div()
-                .flex()
-                .items_center()
-                .gap_3()
-                .px_5()
-                .py_2()
-                .border_b_1()
-                .border_color(style::color(palette.colors.border_soft))
-                .child(
-                    div()
-                        .w(px(52.0))
-                        .flex_none()
-                        .child(style::text(label.to_string(), TextRole::ComposeLabel, cx)),
-                )
-                .child(div().flex_1().min_w_0().child(input))
-        };
-
         let sending = self.send_at.is_some();
         let remaining = self
             .send_at
@@ -239,10 +338,7 @@ impl Render for Compose {
                         .border_1()
                         .border_color(style::color(palette.colors.border_strong))
                         .text_color(style::color(palette.colors.secondary))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _window, cx| this.undo_send(cx)),
-                        )
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _w, cx| this.undo_send(cx)))
                         .child(style::text("Undo", TextRole::ButtonLabel, cx)),
                 )
                 .into_any_element()
@@ -269,13 +365,116 @@ impl Render for Compose {
                         .rounded(px(palette.radii.button))
                         .bg(style::color(palette.colors.accent))
                         .text_color(rgb(0xffffff))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _window, cx| this.begin_send(cx)),
-                        )
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _w, cx| this.begin_send(cx)))
                         .child(style::text("Send", TextRole::ButtonLabelFilled, cx)),
                 )
                 .into_any_element()
+        };
+
+        // Recipient tokens (7.2): pills, then the input for the next address.
+        let tokens = |this: &Self,
+                      to: bool,
+                      list: &[Recipient],
+                      input: &Entity<InputState>,
+                      cx: &mut Context<Self>| {
+            let palette = style::palette(cx);
+            let mut row = div().flex().flex_wrap().items_center().gap_1();
+            for (index, recipient) in list.iter().enumerate() {
+                let valid = recipient.address.contains('@');
+                let color = if valid {
+                    palette.colors.accent_text
+                } else {
+                    palette.colors.danger
+                };
+                row = row.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_2()
+                        .py_1()
+                        .rounded(px(palette.radii.token))
+                        .bg(style::color(palette.colors.accent_tint))
+                        .text_size(px(12.0))
+                        .text_color(style::color(color))
+                        .child(
+                            recipient
+                                .name
+                                .clone()
+                                .unwrap_or_else(|| recipient.address.clone()),
+                        )
+                        .child(
+                            div()
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _w, cx| {
+                                        this.remove_token(to, index, cx);
+                                    }),
+                                )
+                                .child("×"),
+                        ),
+                );
+            }
+            let _ = this;
+            let _ = input;
+            row.child(div().flex_1().min_w_0().child(Input::new(input)))
+        };
+
+        let field = |label: &str, content: AnyElement, cx: &mut Context<Self>| {
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .px_5()
+                .py_2()
+                .border_b_1()
+                .border_color(style::color(palette.colors.border_soft))
+                .child(
+                    div()
+                        .w(px(52.0))
+                        .flex_none()
+                        .child(style::text(label.to_string(), TextRole::ComposeLabel, cx)),
+                )
+                .child(div().flex_1().min_w_0().child(content))
+        };
+
+        let suggestions = if self.suggestions.is_empty() {
+            None
+        } else {
+            Some(
+                div()
+                    .flex()
+                    .flex_col()
+                    .px_5()
+                    .py_1()
+                    .bg(style::color(palette.colors.card))
+                    .border_b_1()
+                    .border_color(style::color(palette.colors.border_soft))
+                    .children(self.suggestions.clone().into_iter().enumerate().map(
+                        |(index, contact)| {
+                            let address = contact.address.clone();
+                            div()
+                                .px_2()
+                                .py_1()
+                                .rounded(px(palette.radii.control))
+                                .text_size(px(12.0))
+                                .text_color(style::color(palette.colors.secondary))
+                                .hover(|this| this.bg(style::color(snail_ui::theme::LIGHT.accent_tint)))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, window, cx| {
+                                        if let Some(contact) = this.suggestions.get(index).cloned() {
+                                            this.commit_suggestion(contact, window, cx);
+                                        }
+                                    }),
+                                )
+                                .child(match &contact.name {
+                                    Some(name) => format!("{name} <{address}>"),
+                                    None => address,
+                                })
+                        },
+                    )),
+            )
         };
 
         div()
@@ -285,12 +484,11 @@ impl Render for Compose {
             .bg(style::color(palette.colors.canvas))
             .text_color(style::color(palette.colors.ink))
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 let modifiers = event.keystroke.modifiers;
                 if event.keystroke.key == "d" && modifiers.platform && modifiers.shift {
                     this.begin_send(cx);
                 }
-                let _ = window;
             }))
             .child(
                 div()
@@ -311,10 +509,10 @@ impl Render for Compose {
                             .gap_3()
                             .when(cfg!(target_os = "macos"), |this| this.pl(px(78.0)))
                             .child(style::text(
-                                if self.draft.to.is_empty() {
-                                    "New message".to_string()
+                                if self.to_tokens.is_empty() {
+                                    "New message"
                                 } else {
-                                    "Message".to_string()
+                                    "Message"
                                 },
                                 TextRole::ListHeaderTitle,
                                 cx,
@@ -325,19 +523,34 @@ impl Render for Compose {
                     )
                     .child(header_action),
             )
-            .child(field("From", {
-                let name = self
-                    .draft
-                    .from_addr
-                    .clone()
-                    .unwrap_or_else(|| "choose account".into());
-                style::text(name, TextRole::ComposeSubject, cx).into_any_element()
-            }))
-            .child(field("To", Input::new(&self.to).into_any_element()))
-            .child(field("Cc", Input::new(&self.cc).into_any_element()))
+            .child(field(
+                "From",
+                style::text(
+                    self.draft
+                        .from_addr
+                        .clone()
+                        .unwrap_or_else(|| "choose account".into()),
+                    TextRole::ComposeSubject,
+                    cx,
+                )
+                .into_any_element(),
+                cx,
+            ))
+            .child(field(
+                "To",
+                tokens(self, true, &self.to_tokens.clone(), &self.to_input, cx).into_any_element(),
+                cx,
+            ))
+            .when_some(suggestions, |this, suggestions| this.child(suggestions))
+            .child(field(
+                "Cc",
+                tokens(self, false, &self.cc_tokens.clone(), &self.cc_input, cx).into_any_element(),
+                cx,
+            ))
             .child(field(
                 "Subject",
                 Input::new(&self.subject).into_any_element(),
+                cx,
             ))
             .child(
                 div()
@@ -347,27 +560,130 @@ impl Render for Compose {
                     .py_3()
                     .child(Textarea::new(&self.body).size_full()),
             )
+            .child(
+                // Format bar (7.8) and attachments (7.7).
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_5()
+                    .py_2()
+                    .bg(style::color(palette.colors.sunken))
+                    .border_t_1()
+                    .border_color(style::color(palette.colors.border_soft))
+                    .children(
+                        [("B", "b"), ("I", "i"), ("List", "ul"), ("Link", "a")]
+                            .into_iter()
+                            .map(|(label, tag)| {
+                                let tag = tag.to_string();
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded(px(palette.radii.control))
+                                    .text_size(px(12.0))
+                                    .text_color(style::color(palette.colors.muted))
+                                    .hover(|this| this.bg(style::color(palette.colors.card)))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _, window, cx| {
+                                            this.format(&tag, window, cx)
+                                        }),
+                                    )
+                                    .child(label)
+                            }),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .rounded(px(palette.radii.control))
+                            .text_size(px(12.0))
+                            .text_color(style::color(palette.colors.muted))
+                            .hover(|this| this.bg(style::color(palette.colors.card)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _w, cx| this.attach(cx)),
+                            )
+                            .child("Attach…"),
+                    )
+                    .children(
+                        self.attachments
+                            .clone()
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, attachment)| {
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded(px(palette.radii.chip))
+                                    .bg(style::color(palette.colors.chrome))
+                                    .text_size(px(11.0))
+                                    .text_color(style::color(if attachment.bytes.len()
+                                        > Attachment::WARN_BYTES
+                                    {
+                                        palette.colors.danger
+                                    } else {
+                                        palette.colors.secondary
+                                    }))
+                                    .child(format!(
+                                        "{} · {}",
+                                        attachment.filename,
+                                        human_size(attachment.bytes.len())
+                                    ))
+                                    .child(
+                                        div()
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(move |this, _, _w, cx| {
+                                                    if index < this.attachments.len() {
+                                                        this.attachments.remove(index);
+                                                    }
+                                                    this.mark_dirty(cx);
+                                                }),
+                                            )
+                                            .child("×"),
+                                    )
+                            }),
+                    ),
+            )
             .into_any_element()
     }
 }
 
-fn join_addresses(recipients: &[Recipient]) -> String {
-    recipients
-        .iter()
-        .map(|recipient| recipient.address.clone())
-        .collect::<Vec<_>>()
-        .join(", ")
+fn content_type_for(filename: &str) -> &'static str {
+    match filename
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "txt" => "text/plain",
+        "csv" => "text/csv",
+        "zip" => "application/zip",
+        "doc" | "docx" => "application/msword",
+        _ => "application/octet-stream",
+    }
 }
 
-/// Tolerant address parsing for the To/Cc fields (E7.2's tokens land later): split on `,`/`;`.
-fn parse_addresses(input: &str) -> Vec<Recipient> {
-    input
-        .split([',', ';'])
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .map(|token| Recipient {
-            name: None,
-            address: token.to_string(),
-        })
-        .collect()
+fn human_size(bytes: usize) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    let size = bytes as f64;
+    if size >= MB {
+        format!("{:.1} MB", size / MB)
+    } else if size >= KB {
+        format!("{:.0} KB", size / KB)
+    } else {
+        format!("{bytes} B")
+    }
 }

@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 
 /// `(name, sql)`, applied in order; index + 1 is the version it produces.
-pub const MIGRATIONS: &[(&str, &str)] = &[("v1", V1), ("v2", V2)];
+pub const MIGRATIONS: &[(&str, &str)] = &[("v1", V1), ("v2", V2), ("v3", V3)];
 
 /// The version a fresh store ends at.
 pub fn latest_version() -> u32 {
@@ -245,6 +245,21 @@ CREATE TABLE IF NOT EXISTS task (
 /// with the foreign-key cascades v1 already relies on.
 const V2: &str = r#"
 CREATE INDEX IF NOT EXISTS message_by_from ON message (from_addr, date DESC);
+"#;
+
+/// v3 adds harvested contacts, for address autocomplete without any contacts API (E7.3).
+const V3: &str = r#"
+CREATE TABLE IF NOT EXISTS contact (
+    account_id INTEGER NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+    address    TEXT    NOT NULL,
+    name       TEXT,
+    sent       INTEGER NOT NULL DEFAULT 0,
+    received   INTEGER NOT NULL DEFAULT 0,
+    last_seen  INTEGER,
+    PRIMARY KEY (account_id, address)
+);
+
+CREATE INDEX IF NOT EXISTS contact_by_last_seen ON contact (account_id, last_seen DESC);
 "#;
 
 /// The schema version currently recorded, or 0 for an empty store.

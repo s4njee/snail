@@ -63,6 +63,40 @@ impl MailModel {
             .map(|account| account.address.clone())
     }
 
+    /// Address autocomplete from the harvested contacts (E7.3).
+    pub fn suggest_contacts(&self, prefix: &str, limit: u32) -> Vec<snail_core::store::ContactRow> {
+        let Some(account_id) = self.first_account_id() else {
+            return Vec::new();
+        };
+        self.store
+            .suggest_contacts(account_id, prefix, limit)
+            .unwrap_or_default()
+    }
+
+    /// Rebuild the contacts table from the messages already on disk (E7.3).
+    pub fn harvest_contacts(&self) -> Option<usize> {
+        self.store.harvest_contacts(self.first_account_id()?).ok()
+    }
+
+    /// Pending send count, for the sync footer's "N changes pending" (E16.6/E7.12).
+    pub fn pending_sends(&self) -> i64 {
+        self.store
+            .op_counts()
+            .map(|counts| counts.outstanding() + counts.dead)
+            .unwrap_or(0)
+    }
+
+    /// `(failed_or_dead, pending)` send counts for the sidebar footer (E7.12).
+    pub fn send_queue(&self) -> (i64, i64) {
+        let counts = self.store.op_counts().unwrap_or_default();
+        (counts.failed + counts.dead, counts.pending)
+    }
+
+    /// Explicit retry: move failed and dead-lettered sends back to pending (E7.12).
+    pub fn retry_failed_sends(&self) -> usize {
+        self.store.requeue_failed_ops().unwrap_or(0)
+    }
+
     /// The first account, for a first-cut send (E7.11 will pick by identity).
     pub fn first_account_id(&self) -> Option<i64> {
         self.store.accounts().ok()?.first().map(|account| account.id)
