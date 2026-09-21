@@ -1,5 +1,6 @@
 /target
 **/target
+/dist
 /spikes/*/target
 /spikes/*/Cargo.lock
 .DS_Store
