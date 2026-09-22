@@ -7820,6 +7820,7 @@ dependencies = [
  "block2 0.6.2",
  "chrono",
  "chrono-tz",
+ "embed-resource",
  "env_logger",
  "futures",
  "gpui-kit",
@@ -7841,6 +7842,7 @@ dependencies = [
  "snail-core",
  "snail-services",
  "snail-ui",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7872,6 +7874,7 @@ dependencies = [
  "sha1",
  "sha2 0.10.9",
  "url",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
@@ -7895,6 +7898,7 @@ dependencies = [
  "sha2 0.10.9",
  "snail-core",
  "tokio",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

@@ -9,6 +9,7 @@ use anyhow::Result;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crate::atomic_file::atomic_write;
 use crate::paths::Paths;
 
 /// Bumped when the envelope changes shape; a mismatch falls back to defaults.
@@ -67,9 +68,7 @@ impl SettingsStore {
         std::fs::create_dir_all(&self.dir)?;
         let body = serde_json::json!({ "version": VERSION, "data": value }).to_string();
         let path = self.file(section);
-        let temp = path.with_extension("json.tmp");
-        std::fs::write(&temp, body)?;
-        std::fs::rename(&temp, &path)?;
+        atomic_write(&path, body.as_bytes())?;
         Ok(())
     }
 }
@@ -143,7 +142,7 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(!store.file("theme").with_extension("json.tmp").exists());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

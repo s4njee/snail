@@ -1,3 +1,8 @@
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 //! Snail's GPUI app: views, models, theme application, actions/keymap (plan.md §2).
 
 use std::borrow::Cow;
@@ -101,6 +106,9 @@ fn main() {
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
             startup::mark("app_launched");
+            // Windows toast attribution and taskbar grouping require a stable process identity.
+            // Set it before GPUI initialization opens a window or any service posts a notification.
+            cx.set_app_identity(snail_core::paths::APP_ID, "Snail");
             gpui_kit::init(cx);
             startup::mark("gpui_init");
 

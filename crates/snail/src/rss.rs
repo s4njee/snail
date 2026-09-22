@@ -2,7 +2,7 @@
 //!
 //! macOS reads the task's resident size with `proc_pidinfo`, the peak with `getrusage`, and the
 //! physical footprint with `proc_pid_rusage`; Linux reads `VmRSS` and `VmHWM` from
-//! `/proc/self/status`. Elsewhere everything is `None`. Adapted from the reference project.
+//! `/proc/self/status`; Windows uses `GetProcessMemoryInfo`. Adapted from the reference project.
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Rss {
@@ -88,7 +88,34 @@ mod platform {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(target_os = "windows")]
+mod platform {
+    use super::Rss;
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    pub fn sample() -> Rss {
+        // SAFETY: the pseudo-handle is always valid in this process, and `counters` is a writable
+        // structure whose byte size is supplied to the API.
+        unsafe {
+            let mut counters = std::mem::zeroed::<PROCESS_MEMORY_COUNTERS>();
+            counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+            let size = counters.cb;
+            if GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size) == 0 {
+                return Rss::default();
+            }
+            Rss {
+                current_bytes: Some(counters.WorkingSetSize as u64),
+                peak_bytes: Some(counters.PeakWorkingSetSize as u64),
+                footprint_bytes: None,
+            }
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 mod platform {
     use super::Rss;
 
@@ -117,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     fn this_process_has_resident_memory() {
         let rss = sample();
         let current = rss.current_bytes.expect("current RSS");

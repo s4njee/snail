@@ -47,6 +47,15 @@ Runtime:
 
 ## Windows
 
-- MSVC toolchain with the **Spectre-mitigated libraries** (the `x86_64-pc-windows-msvc` target).
+- Visual Studio 2022's **Desktop development with C++** workload, including the current MSVC
+  x64/x86 build tools and a Windows 11 SDK (`x86_64-pc-windows-msvc`). The 2026-09-21 reference
+  machine builds without the optional Spectre libraries; the portable release audit will decide
+  whether those remain a release-toolchain requirement.
 - No other system packages; `rusqlite` bundled and `keyring`'s `windows-native` backend build
   without external dependencies.
+- Install the pinned compiler with
+  `rustup toolchain install 1.97.1-x86_64-pc-windows-msvc --profile minimal`, then run
+  `cargo build --workspace --locked` and `cargo test --workspace --locked` from PowerShell.
+- A personal Gmail build reads its Desktop OAuth client from the gitignored
+  `.secrets\google-oauth.json` file. See `docs/WINDOWS.md`; never commit that file.
+- Build the versioned portable ZIP and checksum with `scripts\package-windows.ps1`.

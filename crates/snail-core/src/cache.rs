@@ -4,14 +4,11 @@
 //! The store keeps only hashes; a missing file is not an error, it is a signal to re-fetch.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 
-/// Distinguishes concurrent writers' temp files, so two threads putting the same bytes never
-/// rename each other's half-written file (which failed with `NotFound` under parallel tests).
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+use crate::atomic_file::atomic_write;
 
 #[derive(Clone, Debug)]
 pub struct CacheStore {
@@ -23,18 +20,6 @@ impl CacheStore {
         Self { root }
     }
 
-    /// A unique sibling temp path for an atomic write. `path`'s own name plus a per-process,
-    /// per-call suffix, so writers cannot collide.
-    fn temp_path(path: &Path) -> PathBuf {
-        let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let mut name = path
-            .file_name()
-            .map(|name| name.to_os_string())
-            .unwrap_or_default();
-        name.push(format!(".tmp-{}-{counter}", std::process::id()));
-        path.with_file_name(name)
-    }
-
     /// Write bytes if absent, returning their content hash. Idempotent, and atomic (temp+rename) so
     /// a crash never leaves a half-written object.
     pub fn put(&self, bytes: &[u8]) -> Result<String> {
@@ -44,9 +29,7 @@ impl CacheStore {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            let temp = Self::temp_path(&path);
-            std::fs::write(&temp, bytes)?;
-            std::fs::rename(&temp, &path)?;
+            atomic_write(&path, bytes)?;
         }
         Ok(hash)
     }
@@ -71,9 +54,7 @@ impl CacheStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let temp = Self::temp_path(&path);
-        std::fs::write(&temp, &content_hash)?;
-        std::fs::rename(temp, path)?;
+        atomic_write(&path, content_hash.as_bytes())?;
         Ok(content_hash)
     }
 

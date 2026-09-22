@@ -5,7 +5,7 @@
 //! clear error rather than a crash or a silent plaintext fallback.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Result, anyhow};
 
@@ -23,6 +23,8 @@ pub struct KeyringStore {
     service: String,
 }
 
+static CREDENTIAL_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+
 impl KeyringStore {
     pub fn new() -> Self {
         Self {
@@ -39,6 +41,17 @@ impl KeyringStore {
     fn entry(&self, key: &str) -> Result<keyring::Entry> {
         keyring::Entry::new(&self.service, key).map_err(|error| explain(error, key))
     }
+
+    fn credential_lock(&self, key: &str) -> Arc<Mutex<()>> {
+        let identity = format!("{}\0{key}", self.service);
+        CREDENTIAL_LOCKS
+            .get_or_init(Default::default)
+            .lock()
+            .expect("credential lock registry poisoned")
+            .entry(identity)
+            .or_default()
+            .clone()
+    }
 }
 
 impl Default for KeyringStore {
@@ -49,6 +62,8 @@ impl Default for KeyringStore {
 
 impl SecretStore for KeyringStore {
     fn get(&self, key: &str) -> Result<Option<String>> {
+        let credential_lock = self.credential_lock(key);
+        let _guard = credential_lock.lock().expect("credential lock poisoned");
         match self.entry(key)?.get_password() {
             Ok(value) => Ok(Some(value)),
             Err(keyring::Error::NoEntry) => Ok(None),
@@ -57,12 +72,16 @@ impl SecretStore for KeyringStore {
     }
 
     fn set(&self, key: &str, value: &str) -> Result<()> {
+        let credential_lock = self.credential_lock(key);
+        let _guard = credential_lock.lock().expect("credential lock poisoned");
         self.entry(key)?
             .set_password(value)
             .map_err(|error| explain(error, key))
     }
 
     fn delete(&self, key: &str) -> Result<()> {
+        let credential_lock = self.credential_lock(key);
+        let _guard = credential_lock.lock().expect("credential lock poisoned");
         match self.entry(key)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(error) => Err(explain(error, key)),

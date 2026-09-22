@@ -529,15 +529,10 @@ fn respond(stream: &mut std::net::TcpStream, status: &str, page: &str) {
     let _ = stream.flush();
 }
 
+#[cfg(not(target_os = "windows"))]
 pub fn open_in_browser(url: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     let mut command = std::process::Command::new("open");
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut command = std::process::Command::new("cmd");
-        command.args(["/C", "start", ""]);
-        command
-    };
     #[cfg(all(unix, not(target_os = "macos")))]
     let mut command = std::process::Command::new("xdg-open");
     command
@@ -545,6 +540,44 @@ pub fn open_in_browser(url: &str) -> Result<()> {
         .spawn()
         .context("open the system browser")?;
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub fn open_in_browser(url: &str) -> Result<()> {
+    open_with_windows_shell(url)
+}
+
+#[cfg(target_os = "windows")]
+fn open_with_windows_shell(target: &str) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let operation = std::ffi::OsStr::new("open")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let target = std::ffi::OsStr::new(target)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: operation and target are owned, NUL-terminated UTF-16 buffers. Null optional
+    // arguments ask Windows to use the current directory and the target's registered handler.
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    } as isize;
+    if result > 32 {
+        Ok(())
+    } else {
+        anyhow::bail!("Windows could not open the target (ShellExecuteW code {result})")
+    }
 }
 
 // --- iCloud (E3.4, E3.4b) --------------------------------------------------------------------

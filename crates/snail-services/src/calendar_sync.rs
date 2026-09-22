@@ -72,7 +72,16 @@ fn system_on_battery() -> bool {
         }
         return saw_ac;
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+
+        let mut status = SYSTEM_POWER_STATUS::default();
+        // SAFETY: `status` is a valid, writable structure for the duration of the call.
+        let available = unsafe { GetSystemPowerStatus(&mut status) } != 0;
+        return available && status.ACLineStatus == 0;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     false
 }
 

@@ -14,6 +14,8 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use crate::atomic_file::replace_file;
+
 /// The bundle id. Directory name is fixed to this on macOS, Linux and Windows.
 pub const APP_ID: &str = "dev.snail.app";
 
@@ -132,9 +134,11 @@ impl RotatingWriter {
     fn rotate_locked(&self, state: &mut RotatingState) -> io::Result<()> {
         state.file = None;
         let rotated = self.path.with_extension("log.1");
-        // A failed rename must not lose the new record; fall through and keep appending.
-        let _ = std::fs::rename(&self.path, rotated);
-        state.written = 0;
+        // A failed replacement must not lose the new record. Leave the active log in place and
+        // reopen it for append; the next write gets another chance to rotate it.
+        if replace_file(&self.path, &rotated).is_ok() {
+            state.written = 0;
+        }
         Ok(())
     }
 }
@@ -142,7 +146,7 @@ impl RotatingWriter {
 impl Write for RotatingWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let mut state = self.state.lock().expect("log lock poisoned");
-        if state.written + buf.len() as u64 > self.max_bytes {
+        if state.written > 0 && state.written + buf.len() as u64 > self.max_bytes {
             self.rotate_locked(&mut state)?;
         }
         if state.file.is_none() {
@@ -235,12 +239,14 @@ mod tests {
         let base = std::env::temp_dir().join(format!("snail-rot-test-{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
         let path = base.join(LOG_FILE);
+        let rotated = path.with_extension("log.1");
+        std::fs::write(&rotated, b"older rotation").unwrap();
         let mut writer = RotatingWriter::new(path.clone(), 32).unwrap();
         writer.write_all(&[b'x'; 24]).unwrap();
         writer.write_all(&[b'y'; 24]).unwrap(); // pushes past the cap, rotates
         drop(writer);
-        let rotated = path.with_extension("log.1");
         assert!(rotated.is_file(), "old log renamed aside");
+        assert_eq!(std::fs::read(&rotated).unwrap(), [b'x'; 24]);
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 24);
         let _ = std::fs::remove_dir_all(&base);
     }

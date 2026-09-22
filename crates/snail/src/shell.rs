@@ -1233,14 +1233,16 @@ impl Shell {
             .border_color(style::color(palette.colors.border_strong))
             .bg(style::color(palette.colors.card))
             .shadow_lg();
-        for item in snail_ui::commands::commands()
+        for (menu_index, item) in snail_ui::commands::commands()
             .iter()
             .filter(|command| command.menu.is_some())
+            .enumerate()
         {
             let id = item.id;
             let enabled = self.command_enabled(id, cx);
             card = card.child(
                 div()
+                    .id(("fallback-menu-item", menu_index))
                     .h(px(34.0))
                     .px_2()
                     .flex()
